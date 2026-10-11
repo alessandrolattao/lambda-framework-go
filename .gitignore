@@ -1,0 +1,3 @@
+/coverage.out
+*.test
+/e2e/startup.md

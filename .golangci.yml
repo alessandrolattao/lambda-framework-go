@@ -1,0 +1,299 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # correctness
+    - govet
+    - errcheck
+    - staticcheck
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - errorlint
+    - err113
+    - errchkjson
+    - errname
+    - wrapcheck
+    - ineffassign
+    - wastedassign
+    - durationcheck
+    - forcetypeassert
+    - exhaustive
+    - gochecksumtype
+    - makezero
+    - reassign
+    - recvcheck
+    - asasalint
+    - musttag
+    - spancheck
+    - protogetter
+
+    # context propagation
+    - contextcheck
+    - containedctx
+    - fatcontext
+    - noctx
+
+    # security
+    - gosec
+    - bidichk
+    - asciicheck
+    - nolintlint
+    - forbidigo
+    - depguard
+    - gomoddirectives
+
+    # modern go
+    - modernize
+    - intrange
+    - copyloopvar
+    - usestdlibvars
+    - usetesting
+    - exptostd
+
+    # style & quality
+    - revive
+    - gocritic
+    - gocognit
+    - gocyclo
+    - nestif
+    - dupl
+    - unparam
+    - unconvert
+    - nakedret
+    - misspell
+    - dupword
+    - godot
+    - godox
+    - godoclint
+    - goconst
+    - perfsprint
+    - prealloc
+    - predeclared
+    - mirror
+    - whitespace
+    - iface
+    - inamedparam
+    - interfacebloat
+    - iotamixing
+    - embeddedstructfieldcheck
+    - goprintffuncname
+    - gocheckcompilerdirectives
+    - nosprintfhostport
+    - canonicalheader
+
+    # http
+    - bodyclose
+
+    # logging
+    - sloglint
+    - loggercheck
+
+    # tests
+    - testifylint
+    - thelper
+    - tparallel
+    - paralleltest
+    - testableexamples
+
+    # unused
+    - unused
+
+  settings:
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # readability of field order wins over a few bytes
+
+    staticcheck:
+      checks:
+        - all
+
+    gocognit:
+      min-complexity: 15
+
+    gocyclo:
+      min-complexity: 15
+
+    nestif:
+      min-complexity: 4
+
+    dupl:
+      threshold: 150
+
+    nakedret:
+      max-func-lines: 0
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    godot:
+      scope: declarations
+
+    interfacebloat:
+      max: 8
+
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Err()
+      ignore-package-globs:
+        - github.com/alessandrolattao/lambda-framework-go/*
+
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          deny:
+            - pkg: encoding/json$
+              desc: use encoding/json/v2 and encoding/json/jsontext
+            - pkg: github.com/pkg/errors
+              desc: use the standard errors package
+            - pkg: github.com/google/uuid
+              desc: use the standard uuid package
+            - pkg: golang.org/x/exp
+              desc: use the standard library
+            - pkg: github.com/aws/aws-xray-sdk-go
+              desc: use OpenTelemetry, as the AWS X-Ray SDK migration guide says
+            - pkg: github.com/aws/aws-sdk-go/
+              desc: use aws-sdk-go-v2
+            - pkg: math/rand$
+              desc: use math/rand/v2
+
+    forbidigo:
+      forbid:
+        - pattern: ^print(ln)?$
+          msg: write through log/slog
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: write through log/slog or an io.Writer
+        - pattern: ^log\.(Print|Fatal|Panic)(f|ln)?$
+          msg: write through log/slog
+
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: blank-imports
+        - name: context-as-argument
+          arguments:
+            # Test helpers take *testing.T first, as thelper wants.
+            - allowTypesBefore: "*testing.T"
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: errorf
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: empty-block
+        - name: unconditional-recursion
+        - name: identical-branches
+        - name: defer
+        - name: datarace
+        - name: modifies-value-receiver
+        - name: struct-tag
+        - name: use-any
+        - name: redundant-import-alias
+        - name: unnecessary-stmt
+        - name: atomic
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+        - name: early-return
+        - name: useless-break
+        - name: waitgroup-by-value
+        - name: deep-exit
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - paramTypeCombine
+        - whyNoLint
+        - hugeParam # aws-lambda-go hands events over by value
+
+    gomoddirectives:
+      # The integration module tests this one through a local replace.
+      replace-local: true
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    sloglint:
+      no-mixed-args: true
+      kv-only: true
+      static-msg: true
+      # One name for the cause of a failure: "err".
+      forbidden-keys:
+        - error
+
+    testifylint:
+      enable-all: true
+
+  exclusions:
+    generated: strict
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - err113
+          - wrapcheck
+          - goconst
+          - gocognit
+          - containedctx
+          - forcetypeassert
+      # The end-to-end tests drive one Lambda container at a time and read its
+      # invocations back in order, START line after START line.
+      - path: ^e2e/
+        linters:
+          - paralleltest
+      - path: _test\.go
+        text: "G404|G101|G304"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+    goimports:
+      local-prefixes:
+        - github.com/alessandrolattao/lambda-framework-go
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
