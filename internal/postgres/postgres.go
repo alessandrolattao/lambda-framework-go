@@ -1,4 +1,5 @@
-// Package postgres opens a Postgres pool tuned for Lambda.
+// Package postgres opens a pool tuned for Lambda, to Postgres (Connect) or to
+// Aurora DSQL (ConnectDSQL).
 package postgres
 
 import (
@@ -19,16 +20,18 @@ import (
 // ErrInvalidPort is returned when WithHost carries a port that is not a TCP port.
 var ErrInvalidPort = errors.New("invalid postgres port")
 
-// Option tunes Connect.
+// Option tunes Connect and ConnectDSQL.
 type Option func(*options)
 
 type options struct {
 	host, port string
 }
 
-// WithHost connects to an overridden host/port while keeping the credentials
-// and database name of the connection string, e.g. to reach the database
-// through a tunnel on localhost. Empty values keep the original ones.
+// WithHost connects to an overridden host/port while keeping everything else,
+// e.g. to reach the database through a tunnel on localhost. With Connect the
+// credentials and database name of the connection string stay; with
+// ConnectDSQL the IAM token and the TLS verification stay those of the
+// cluster endpoint. Empty values keep the original ones.
 func WithHost(host, port string) Option {
 	return func(o *options) {
 		o.host, o.port = host, port
@@ -61,12 +64,8 @@ func Connect(ctx context.Context, connString string, opts ...Option) (*pgxpool.P
 		}
 	}
 
-	// A standard Lambda runs one invocation at a time per execution
-	// environment, so one connection is enough; pgxpool's default of
-	// max(4, NumCPU) would only waste DB slots. An environment that runs
-	// several at once (Lambda Managed Instances) gets one each.
 	if !sets(connString, "pool_max_conns") {
-		cfg.MaxConns = int32(min(max(lambdacontext.MaxConcurrency(), 1), 1<<16))
+		cfg.MaxConns = lambdaMaxConns()
 	}
 	// Recycle connections before Aurora silently closes idle ones, and close
 	// idle connections proactively on warm-but-inactive instances. Jitter
@@ -75,18 +74,13 @@ func Connect(ctx context.Context, connString string, opts ...Option) (*pgxpool.P
 		cfg.MaxConnLifetime = 30 * time.Minute
 	}
 	if !sets(connString, "pool_max_conn_lifetime_jitter") {
-		cfg.MaxConnLifetimeJitter = 30 * time.Second
+		cfg.MaxConnLifetimeJitter = maxConnLifetimeJitter
 	}
 	if !sets(connString, "pool_max_conn_idle_time") {
 		cfg.MaxConnIdleTime = 5 * time.Minute
 	}
-	cfg.AfterConnect = registerTimestamptzUTC
+	tuneForLambda(cfg)
 	cfg.PrepareConn = setStatementTimeout
-	// Every query becomes a span under the one in its context, named after its
-	// operation (SELECT, INSERT) and carrying its SQL text, never its
-	// parameters. The pool's acquire spans are left out: with one connection
-	// per invocation there is nothing to wait for, only noise in every trace.
-	cfg.ConnConfig.Tracer = otelpgx.NewTracer(otelpgx.WithDisableAcquireTracer())
 
 	// The pool outlives ctx, typically the first invocation's, which Lambda
 	// cancels when that invocation returns: the connections the pool opens in
@@ -96,6 +90,31 @@ func Connect(ctx context.Context, connString string, opts ...Option) (*pgxpool.P
 		return nil, fmt.Errorf("create postgres pool: %w", err)
 	}
 	return pool, nil
+}
+
+// maxConnLifetimeJitter spreads the reconnections of the Lambda instances
+// that started together, so that they do not all reconnect at the same moment.
+const maxConnLifetimeJitter = 30 * time.Second
+
+// lambdaMaxConns is the pool size for the execution environment. A standard
+// Lambda runs one invocation at a time per execution environment, so one
+// connection is enough; pgxpool's default of max(4, NumCPU) would only waste
+// database connections. An environment that runs several at once (Lambda
+// Managed Instances) gets one each.
+func lambdaMaxConns() int32 {
+	return int32(min(max(lambdacontext.MaxConcurrency(), 1), 1<<16))
+}
+
+// tuneForLambda sets what every pool gets, whatever the server: timestamptz
+// scanned as UTC, and every query traced.
+//
+// Every query becomes a span under the one in its context, named after its
+// operation (SELECT, INSERT) and carrying its SQL text, never its parameters.
+// The pool's acquire spans are left out: with one connection per invocation
+// there is nothing to wait for, only noise in every trace.
+func tuneForLambda(cfg *pgxpool.Config) {
+	cfg.AfterConnect = registerTimestamptzUTC
+	cfg.ConnConfig.Tracer = otelpgx.NewTracer(otelpgx.WithDisableAcquireTracer())
 }
 
 // sets reports whether the connection string sets the pool parameter key,
@@ -111,14 +130,23 @@ func overrideHost(cfg *pgxpool.Config, host, port string) error {
 		cfg.ConnConfig.Host = host
 	}
 	if port != "" {
-		p, err := strconv.ParseUint(port, 10, 16)
+		p, err := parsePort(port)
 		if err != nil {
-			return fmt.Errorf("%w %q: %w", ErrInvalidPort, port, err)
+			return err
 		}
-		cfg.ConnConfig.Port = uint16(p)
+		cfg.ConnConfig.Port = p
 	}
 	cfg.ConnConfig.Fallbacks = nil
 	return nil
+}
+
+// parsePort reads the port of WithHost.
+func parsePort(port string) (uint16, error) {
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("%w %q: %w", ErrInvalidPort, port, err)
+	}
+	return uint16(p), nil
 }
 
 // registerTimestamptzUTC overrides the default timestamptz codec on every new

@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
@@ -43,6 +44,8 @@ func TestInitEventBridge_IsIdempotent(t *testing.T) {
 
 func TestInitialize_BuildsTheClientsOnce(t *testing.T) {
 	t.Setenv("AWS_REGION", testRegion)
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DSQL_ENDPOINT", "")
 	c := New()
 
 	require.NoError(t, c.initialize(t.Context(), quietLogger().Logger))
@@ -131,17 +134,94 @@ func TestOptions(t *testing.T) {
 
 func TestInitDB_WithoutAConnectionStringThereIsNoPool(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DSQL_ENDPOINT", "")
 	c := New()
 
 	require.NoError(t, c.InitDB(t.Context()))
 	assert.Nil(t, c.DB)
 }
 
-func TestInitDBWithHost_OpensThePoolAndCloseReleasesIt(t *testing.T) { //nolint:paralleltest // New sets the process-wide log and OpenTelemetry state
+func TestInitDBWithHost_OpensThePoolAndCloseReleasesIt(t *testing.T) {
+	t.Setenv("DSQL_ENDPOINT", "")
 	c := New(WithDatabaseURL("postgres://u:p@db.example.com:5432/app"))
 
 	require.NoError(t, c.InitDBWithHost(t.Context(), "localhost", "15432"))
 	require.NotNil(t, c.DB, "pgxpool connects lazily, so the pool exists without a server")
 	assert.Equal(t, "localhost", c.DB.Config().ConnConfig.Host)
 	require.NoError(t, c.Close(t.Context()))
+}
+
+// testDSQLEndpoint is the endpoint of a DSQL cluster that does not exist.
+const testDSQLEndpoint = "abcdefghijklmnopqrstuvwxyz.dsql.eu-west-1.on.aws"
+
+// useStaticAWSCredentials points the AWS credential chain at fixed keys, so
+// that the DSQL tokens are signed without a real account.
+func useStaticAWSCredentials(t *testing.T) {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("DATABASE_URL", "")
+}
+
+func TestOptions_DSQLEndpoint(t *testing.T) {
+	t.Setenv("DSQL_ENDPOINT", "env.dsql.eu-west-1.on.aws")
+
+	assert.Equal(t, "env.dsql.eu-west-1.on.aws", New().dsqlEndpoint, "DSQL_ENDPOINT by default")
+	assert.Equal(t, testDSQLEndpoint, New(WithDSQLEndpoint(testDSQLEndpoint)).dsqlEndpoint, "the option wins")
+}
+
+func TestInitDB_OpensADSQLPool(t *testing.T) {
+	useStaticAWSCredentials(t)
+	t.Setenv("AWS_REGION", testRegion)
+	c := New(WithDSQLEndpoint(testDSQLEndpoint))
+
+	require.NoError(t, c.InitDB(t.Context()))
+	require.NotNil(t, c.DB, "pgxpool connects lazily, so the pool exists without a cluster")
+	t.Cleanup(c.DB.Close)
+	cfg := c.DB.Config()
+	assert.Equal(t, testDSQLEndpoint, cfg.ConnConfig.Host)
+	assert.Equal(t, "admin", cfg.ConnConfig.User)
+	assert.EqualValues(t, 1, cfg.MaxConns, "one connection per invocation at a time")
+	assert.Nil(t, cfg.PrepareConn, "DSQL rejects the statement_timeout Postgres gets")
+}
+
+func TestInitDBWithHost_DSQLDialsTheTunnel(t *testing.T) {
+	useStaticAWSCredentials(t)
+	t.Setenv("AWS_REGION", testRegion)
+	c := New(WithDSQLEndpoint(testDSQLEndpoint))
+
+	require.NoError(t, c.InitDBWithHost(t.Context(), "localhost", "15432"))
+	require.NotNil(t, c.DB)
+	t.Cleanup(c.DB.Close)
+	cfg := c.DB.Config()
+	cc := cfg.ConnConfig.Copy()
+	require.NoError(t, cfg.BeforeConnect(t.Context(), cc))
+	assert.Equal(t, "localhost", cc.Host)
+	assert.EqualValues(t, 15432, cc.Port)
+	assert.True(t, strings.HasPrefix(cc.Password, testDSQLEndpoint+"?"), "the token is signed for the endpoint")
+}
+
+func TestInitDB_RefusesTwoDatabases(t *testing.T) { //nolint:paralleltest // New sets the process-wide log and OpenTelemetry state
+	c := New(WithDatabaseURL("postgres://u:p@db.example.com:5432/app"), WithDSQLEndpoint(testDSQLEndpoint))
+
+	require.ErrorIs(t, c.InitDB(t.Context()), errTwoDatabases)
+	assert.Nil(t, c.DB)
+}
+
+// TestInitialize_RetriesAFailedDSQLPool covers a cold start whose DSQL pool
+// cannot be created (here, no region to sign the tokens for): that invocation
+// fails, and the next one tries again.
+func TestInitialize_RetriesAFailedDSQLPool(t *testing.T) {
+	useStaticAWSCredentials(t)
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	c := New(WithDSQLEndpoint("db.example.com"))
+
+	require.Error(t, c.initialize(t.Context(), quietLogger().Logger))
+	assert.Nil(t, c.DB)
+
+	t.Setenv("AWS_REGION", testRegion)
+	require.NoError(t, c.initialize(t.Context(), quietLogger().Logger))
+	require.NotNil(t, c.DB)
+	t.Cleanup(c.DB.Close)
 }

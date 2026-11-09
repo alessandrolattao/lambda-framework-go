@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -133,28 +134,52 @@ func (c *Container) sdkTracerProvider() tracing.TracerProvider {
 	return c.Tracer.AWSTracerProvider()
 }
 
-// InitDB opens the Postgres pool from the connection string (WithDatabaseURL,
-// or DATABASE_URL). A Lambda gets it on its first invocation; code that runs
-// outside the handler lifecycle (e.g. a Fargate task CLI) calls it directly.
-// Without a connection string there is no pool and no error. Idempotent: an
-// existing pool is kept.
+// errTwoDatabases is the initialization error of a container given both a
+// Postgres connection string and a DSQL endpoint.
+var errTwoDatabases = errors.New("both a Postgres connection string (WithDatabaseURL, DATABASE_URL) and a DSQL endpoint (WithDSQLEndpoint, DSQL_ENDPOINT) are set: a container has one database")
+
+// InitDB opens the database pool: to the Aurora DSQL cluster when a DSQL
+// endpoint is set (WithDSQLEndpoint, or DSQL_ENDPOINT), to Postgres when a
+// connection string is (WithDatabaseURL, or DATABASE_URL). A Lambda gets it on
+// its first invocation; code that runs outside the handler lifecycle (e.g. a
+// Fargate task CLI) calls it directly. With neither there is no pool and no
+// error; with both, an error. Idempotent: an existing pool is kept.
 func (c *Container) InitDB(ctx context.Context) error {
 	return c.InitDBWithHost(ctx, "", "")
 }
 
-// InitDBWithHost is like InitDB but connects to an overridden host/port while
-// keeping the credentials and database name of the connection string, e.g. to
-// reach the database through a tunnel on localhost. Empty overrides keep the
+// InitDBWithHost is like InitDB but connects to an overridden host/port, e.g.
+// to reach the database through a tunnel on localhost. Postgres keeps the
+// credentials and database name of the connection string; DSQL keeps the IAM
+// token and the TLS verification of the endpoint. Empty overrides keep the
 // original values.
 func (c *Container) InitDBWithHost(ctx context.Context, host, port string) error {
-	if c.DB != nil || c.databaseURL == "" {
+	if c.DB != nil {
 		return nil
 	}
-	pool, err := postgres.Connect(ctx, c.databaseURL, postgres.WithHost(host, port))
-	if err != nil {
-		return fmt.Errorf("connect to Postgres: %w", err)
+	switch {
+	case c.dsqlEndpoint != "" && c.databaseURL != "":
+		return errTwoDatabases
+	case c.dsqlEndpoint != "":
+		// The credentials of the AWS config, loaded by the first invocation;
+		// nil for a container that never loaded it, and the connector then
+		// loads the default chain itself.
+		pool, err := postgres.ConnectDSQL(ctx, postgres.DSQL{
+			Endpoint:    c.dsqlEndpoint,
+			Region:      os.Getenv("AWS_REGION"),
+			Credentials: c.awsConfig.Credentials,
+		}, postgres.WithHost(host, port))
+		if err != nil {
+			return fmt.Errorf("connect to Aurora DSQL: %w", err)
+		}
+		c.DB = pool
+	case c.databaseURL != "":
+		pool, err := postgres.Connect(ctx, c.databaseURL, postgres.WithHost(host, port))
+		if err != nil {
+			return fmt.Errorf("connect to Postgres: %w", err)
+		}
+		c.DB = pool
 	}
-	c.DB = pool
 	return nil
 }
 
