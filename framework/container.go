@@ -28,7 +28,7 @@ import (
 
 // Container holds the dependencies a business handler works with: the
 // Powertools logger, tracer and metrics, the AWS SDK clients and the
-// database pool.
+// database pool, to Postgres or to Aurora DSQL.
 //
 // A Container built by New creates the clients it is missing and the
 // database pool on the first invocation, once per cold start; a client already
@@ -47,6 +47,7 @@ type Container struct {
 
 	awsConfig      aws.Config
 	databaseURL    string
+	dsqlEndpoint   string
 	trustedProxies int
 	service        string
 	loggingOpts    []logging.Option
@@ -82,13 +83,30 @@ type Option func(*Container)
 
 // WithDatabaseURL sets the Postgres connection string, in URL
 // (postgres://user:pass@host:5432/db?sslmode=require) or keyword/value form.
-// Without it New reads DATABASE_URL; with neither the container has no pool.
+// Without it New reads DATABASE_URL; with neither, and no DSQL endpoint, the
+// container has no pool.
 //
 // An application deployed with SST reads the linked database resource in its
 // main and passes the string here: the password then stays in the encrypted
 // bundle SST ships, instead of a plaintext environment variable.
 func WithDatabaseURL(url string) Option {
 	return func(c *Container) { c.databaseURL = url }
+}
+
+// WithDSQLEndpoint sets the endpoint of the Aurora DSQL cluster the pool
+// connects to, <cluster id>.dsql.<region>.on.aws, in the region in
+// AWS_REGION. Without it New reads DSQL_ENDPOINT.
+//
+// DSQL has no password: the pool connects as the database user admin with an
+// IAM token, which the AWS connector signs for every new connection with the
+// function's credentials. The function's role needs dsql:DbConnectAdmin on
+// the cluster; an SST link to the cluster grants it.
+//
+// A container gets one database: a DSQL endpoint together with a Postgres
+// connection string (WithDatabaseURL or DATABASE_URL) fails the
+// initialization.
+func WithDSQLEndpoint(endpoint string) Option {
+	return func(c *Container) { c.dsqlEndpoint = endpoint }
 }
 
 // WithTrustedProxies tells the container how many proxies of yours sit in
@@ -150,9 +168,10 @@ func WithMetrics(opts ...metrics.Option) Option {
 // per process, so build one Container per process.
 func New(opts ...Option) *Container {
 	c := &Container{
-		databaseURL: os.Getenv("DATABASE_URL"),
-		service:     defaultService(),
-		lifecycle:   &lifecycle{},
+		databaseURL:  os.Getenv("DATABASE_URL"),
+		dsqlEndpoint: os.Getenv("DSQL_ENDPOINT"),
+		service:      defaultService(),
+		lifecycle:    &lifecycle{},
 	}
 	for _, opt := range opts {
 		opt(c)

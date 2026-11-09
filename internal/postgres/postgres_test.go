@@ -31,16 +31,20 @@ const defaultTestDatabaseURL = "postgres://postgres:postgres@localhost:5432/post
 // space separator is a regression of the UTC-scan configuration.
 var rfc3339UTCZ = regexp.MustCompile(`^"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z"$`)
 
+// testDatabaseURL is TEST_DATABASE_URL, else the local default.
+func testDatabaseURL() string {
+	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+		return dsn
+	}
+	return defaultTestDatabaseURL
+}
+
 // connectRaw opens a single pgx connection to the test DB with the same
 // AfterConnect hook Connect installs, skipping the test when no database is
 // reachable.
 func connectRaw(t *testing.T) *pgx.Conn {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultTestDatabaseURL
-	}
-	conn, err := pgx.Connect(t.Context(), dsn)
+	conn, err := pgx.Connect(t.Context(), testDatabaseURL())
 	if err != nil {
 		t.Skipf("no test database available: %v", err)
 	}
@@ -355,16 +359,12 @@ func TestConnect_RejectsABadPort(t *testing.T) {
 // pool: one span per query, named after its operation, and nothing for the
 // statement_timeout set before it.
 func TestConnect_TracesQueriesButNotTheTimeout(t *testing.T) { //nolint:paralleltest // it swaps the global tracer provider
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultTestDatabaseURL
-	}
 	previous := otel.GetTracerProvider()
 	recorder := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
 	t.Cleanup(func() { otel.SetTracerProvider(previous) })
 
-	pool, err := Connect(t.Context(), dsn)
+	pool, err := Connect(t.Context(), testDatabaseURL())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

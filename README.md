@@ -7,8 +7,8 @@ each handler receives its clients and does its job.
 
 It wires the Powertools logger, tracer and metrics, the Powertools Event
 Handler router with typed, validated operations, the AWS SDK clients and a
-Postgres pool around your business handlers, and gives every failure one place
-to be reported.
+database pool, to Postgres or to Aurora DSQL, around your business handlers,
+and gives every failure one place to be reported.
 
 Requires Go 1.27.
 
@@ -103,8 +103,9 @@ validation, parser...) work inside these handlers as they do anywhere.
   annotations) and, when metrics are configured, `LogMetrics` (one metric set
   per invocation, flushed at its end).
 - **Initialization once per cold start.** The AWS config, the clients
-  (`S3`, `EventBridge`, `SFN`, `Dynamo`, `Websocket`) and the Postgres pool are
-  created on the first invocation and reused afterwards. A failed
+  (`S3`, `EventBridge`, `SFN`, `Dynamo`, `Websocket`) and the database pool
+  (Postgres or Aurora DSQL) are created on the first invocation and reused
+  afterwards. A failed
   initialization is retried by the next invocation. A client you put in a field
   before that (a fake, in a test) is kept.
 - **Per-invocation state in the context.** The handler shares the container,
@@ -138,7 +139,7 @@ validation, parser...) work inside these handlers as they do anywhere.
 - **Tracing with OpenTelemetry**, through the Powertools tracer: the X-Ray UDP
   exporter the AWS X-Ray migration guide prescribes for Lambda. Each
   invocation is a server span under the trace Lambda started, the handler runs
-  in a `## businessLogic` span, and the AWS SDK calls and the Postgres queries
+  in a `## businessLogic` span, and the AWS SDK calls and the database queries
   (through `otelpgx`: operation and SQL text, never the parameters) made with
   its context are spans below it. An API request is described on the
   invocation's span (X-Ray's http block, `http_route` and `http_status`
@@ -158,7 +159,8 @@ Options of `framework.New`:
 | `WithTracerProvider(tp)` | X-Ray UDP exporter | Another OpenTelemetry tracer provider |
 | `WithMetrics(opts...)` | off | Turns the Powertools metrics on (namespace, dimensions, Datadog) |
 | `WithRouter(opts...)` | | Options of the Event Handler router (CORS, debug, strip prefixes, OpenAPI) |
-| `WithDatabaseURL(url)` | `DATABASE_URL` | Postgres connection string; without one there is no pool |
+| `WithDatabaseURL(url)` | `DATABASE_URL` | Postgres connection string |
+| `WithDSQLEndpoint(endpoint)` | `DSQL_ENDPOINT` | Aurora DSQL cluster endpoint, in the region in `AWS_REGION` |
 | `WithTrustedProxies(n)` | `0` | Proxies in front of API Gateway (CloudFront is 1), used to find the client IP |
 
 Environment variables: every `POWERTOOLS_*` variable of the utilities
@@ -169,21 +171,59 @@ for indented logs while developing...), Lambda's `AWS_LAMBDA_LOG_LEVEL`, and:
 | Variable | Meaning |
 |----------|---------|
 | `DATABASE_URL` | Postgres connection string, when `WithDatabaseURL` is not used |
+| `DSQL_ENDPOINT` | Aurora DSQL cluster endpoint, when `WithDSQLEndpoint` is not used |
+| `AWS_REGION` | The region of the Aurora DSQL cluster; Lambda sets it to the function's own |
 | `WS_ENDPOINT` | WebSocket API endpoint; without it `Websocket` is nil |
 | `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3` | A custom S3 endpoint (MinIO, LocalStack, Floci); S3 then uses path-style addressing |
 
 Metrics are on when `WithMetrics` is used or `POWERTOOLS_METRICS_NAMESPACE` is
 set; without them no invocation flushes an empty metric set.
 
+A container has at most one database: Postgres with a connection string,
+Aurora DSQL with a cluster endpoint. With neither there is no pool and `DB` is
+nil; with both, the first invocation fails. Either way `DB` is a
+`*pgxpool.Pool`, and handlers use it the same way.
+
+### Postgres
+
 The Postgres pool holds one connection per invocation the execution
 environment can run at once, unless the connection string sets
 `pool_max_conns`. Every statement is capped to the time the invocation has left.
+
+### Aurora DSQL
+
+DSQL has no password: a connection authenticates with an IAM token. The pool
+goes through AWS's own connector,
+[Aurora DSQL Connector for Go](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/SECTION_program-with-go-pgx-connector.html)
+on pgx, which signs a fresh token, valid 15 minutes, for every new connection
+with the function's credentials. A warm execution environment that opens a
+connection long after its cold start still gets in.
+
+- The pool connects to the `postgres` database as the database user `admin`,
+  over TLS verified against the endpoint. The function's role needs
+  `dsql:DbConnectAdmin` on the cluster.
+- It holds one connection per invocation the execution environment can run at
+  once, and recycles them with the connector's own lifetimes (55 minutes, 10
+  minutes idle), below the hour after which DSQL closes a connection.
+- Statements are not capped server side: DSQL rejects `statement_timeout` and
+  ends every transaction after 5 minutes on its own. A query still running
+  when the invocation's deadline passes fails at that deadline, on the client.
+- Queries run in pgx's `QueryExecModeDescribeExec`, as the connector sets it:
+  safe across live schema changes, at the cost of one more round trip per
+  query.
+- DSQL resolves conflicting transactions with optimistic concurrency control:
+  the transaction that commits second fails with SQLSTATE `OC000`, `OC001` or
+  `40001`, and is meant to be retried. The connector's
+  [`occretry`](https://pkg.go.dev/github.com/awslabs/aurora-dsql-connectors/go/pgx/occretry)
+  package retries a transaction or a statement on `c.DB`.
 
 ### With SST
 
 SST encrypts linked resources into the function bundle, so the database
 password never sits in a plaintext environment variable. Keep it that way:
 read the linked resource in `main` and pass the connection string.
+
+#### Postgres
 
 ```go
 import (
@@ -231,6 +271,42 @@ func main() {
 }
 ```
 
+#### Aurora DSQL
+
+Link the cluster to the function: the link carries the endpoint and grants the
+function's role `dsql:DbConnect` and `dsql:DbConnectAdmin` on the cluster.
+
+```ts
+const database = new sst.aws.Dsql("Database");
+
+new sst.aws.Function("Orders", {
+  handler: "./cmd/orders",
+  runtime: "go",
+  link: [database],
+});
+```
+
+Read the endpoint in `main` and pass it on; the region is the function's own,
+in `AWS_REGION`.
+
+```go
+import (
+	"fmt"
+
+	"github.com/sst/sst/v3/sdk/golang/resource"
+)
+
+func main() {
+	endpoint, err := resource.Get("Database", "endpoint")
+	if err != nil {
+		panic(err)
+	}
+	c := framework.New(framework.WithDSQLEndpoint(fmt.Sprint(endpoint)))
+	c.Get("/orders/{id}", getOrder)
+	lambda.Start(c.HTTP())
+}
+```
+
 ## Testing a handler
 
 Build a `Container` by hand with fakes in its fields and call the business
@@ -253,8 +329,10 @@ go test ./...
 golangci-lint run ./...
 ```
 
-The lint configuration is strict, the same as Powertools'. The Postgres tests
-skip themselves without a database. To run them:
+The lint configuration is strict, the same as Powertools'. The Aurora DSQL
+tests need neither a cluster nor the network: the pool connects lazily, and
+they sign tokens with fixed credentials. The Postgres tests skip themselves
+without a database. To run them:
 
 ```sh
 docker run -d --rm -e POSTGRES_PASSWORD=postgres -p 55432:5432 postgres:18-alpine
@@ -274,7 +352,8 @@ go test -run '^$' -fuzz '^FuzzClientIP$' -fuzztime 1m ./request
 one) that runs two real Lambdas, an API Gateway HTTP API one and an
 EventBridge one, the way Lambda does: built for `provided.al2023`, run in the
 Lambda base image under the Runtime Interface Emulator, with the memory and
-the CPU share of a Lambda size. Postgres runs next to them, and a UDP listener
+the CPU share of a Lambda size. Postgres runs next to them (Aurora DSQL has no
+local version, so the suite runs on Postgres), and a UDP listener
 stands in for the X-Ray endpoint, so the tests check responses, database
 writes, log records and exported spans, on the happy paths and the failing
 ones. It needs Docker.

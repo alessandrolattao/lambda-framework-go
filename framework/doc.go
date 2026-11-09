@@ -1,7 +1,8 @@
 // Package framework runs AWS Lambda handlers with their dependencies wired in,
 // on Powertools for AWS Lambda (Go): its logger, tracer and metrics, its
-// Event Handler router, the AWS SDK clients, a Postgres pool, and one place
-// where every failure is reported.
+// Event Handler router, the AWS SDK clients, a database pool (Postgres, or
+// Aurora DSQL through the AWS connector), and one place where every failure
+// is reported.
 //
 // A Lambda builds one Container at start-up, in main, and registers its
 // business handlers. An API Gateway HTTP API registers typed operations,
