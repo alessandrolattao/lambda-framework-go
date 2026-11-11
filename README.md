@@ -24,6 +24,7 @@ go get github.com/alessandrolattao/lambda-framework-go
 | `request`  | What typed binding does not cover: the JWT claims API Gateway verified, the client IP behind trusted proxies, comma-separated id lists |
 | `response` | The error envelope, success responses with cache headers, CSV and content negotiation |
 | `migrate`  | The business handler of a migration Lambda: goose SQL migrations on Aurora DSQL (or Postgres) |
+| `sst`      | The resources SST links to a Lambda: the value of an `sst.Secret`, the properties of any other component |
 
 ## Quick start
 
@@ -222,41 +223,43 @@ connection long after its cold start still gets in.
 
 SST encrypts linked resources into the function bundle, so the database
 password never sits in a plaintext environment variable. Keep it that way:
-read the linked resource in `main` and pass the connection string.
+read the linked resource with the `sst` package in `main`, once per cold
+start, and pass it on. `sst.Get` decodes a linked resource into a struct
+whose JSON tags name the properties its component links; `sst.Secret` returns
+the value of an `sst.Secret`. Both take the name the component has in
+`sst.config.ts`, and a resource that is not linked to the function is an error
+that names it: `sst: linked resource "Database": not found`.
 
 #### Postgres
 
 ```go
 import (
-	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 
-	"github.com/sst/sst/v3/sdk/golang/resource"
+	"github.com/alessandrolattao/lambda-framework-go/sst"
 )
 
+// database holds the properties an sst.aws.Postgres links.
+type database struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Database string `json:"database"`
+}
+
 func databaseURL() (string, error) {
-	get := func(key string) (string, error) {
-		v, err := resource.Get("Database", key)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprint(v), nil
-	}
-	host, err := get("host")
-	if err != nil {
+	var db database
+	if err := sst.Get("Database", &db); err != nil {
 		return "", err
 	}
-	port, _ := get("port")
-	user, _ := get("username")
-	password, _ := get("password")
-	name, _ := get("database")
-
 	u := url.URL{
 		Scheme: "postgres",
-		User:   url.UserPassword(user, password),
-		Host:   net.JoinHostPort(host, port),
-		Path:   "/" + name,
+		User:   url.UserPassword(db.Username, db.Password),
+		Host:   net.JoinHostPort(db.Host, strconv.Itoa(db.Port)),
+		Path:   "/" + db.Database,
 	}
 	return u.String(), nil
 }
@@ -291,20 +294,56 @@ Read the endpoint in `main` and pass it on; the region is the function's own,
 in `AWS_REGION`.
 
 ```go
-import (
-	"fmt"
-
-	"github.com/sst/sst/v3/sdk/golang/resource"
-)
+import "github.com/alessandrolattao/lambda-framework-go/sst"
 
 func main() {
-	endpoint, err := resource.Get("Database", "endpoint")
+	var db struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := sst.Get("Database", &db); err != nil {
+		panic(err)
+	}
+	c := framework.New(framework.WithDSQLEndpoint(db.Endpoint))
+	c.Get("/orders/{id}", getOrder)
+	lambda.Start(c.HTTP())
+}
+```
+
+#### Secrets
+
+Link the `sst.Secret` to the function and read its value in `main`:
+
+```ts
+const turnstileKey = new sst.Secret("TurnstileSecretKey");
+
+new sst.aws.Function("Signups", {
+  handler: "./cmd/signups",
+  runtime: "go",
+  link: [turnstileKey],
+});
+```
+
+```go
+import "github.com/alessandrolattao/lambda-framework-go/sst"
+
+func main() {
+	turnstileKey, err := sst.Secret("TurnstileSecretKey")
 	if err != nil {
 		panic(err)
 	}
-	c := framework.New(framework.WithDSQLEndpoint(fmt.Sprint(endpoint)))
-	c.Get("/orders/{id}", getOrder)
+	s := signups{turnstileKey: turnstileKey}
+	c := framework.New()
+	c.Post("/signups", s.create)
 	lambda.Start(c.HTTP())
+}
+
+type signups struct {
+	turnstileKey string
+}
+
+func (s signups) create(ctx context.Context, c *framework.Container, in signup) (account, error) {
+	// Verify in.Body.Token with s.turnstileKey, then write to c.DB.
+	...
 }
 ```
 
@@ -411,11 +450,13 @@ new sst.aws.Function("OrdersMigrations", {
 
 ```go
 func main() {
-	endpoint, err := resource.Get("Database", "endpoint")
-	if err != nil {
+	var db struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := sst.Get("Database", &db); err != nil {
 		panic(err)
 	}
-	c := framework.New(framework.WithDSQLEndpoint(fmt.Sprint(endpoint)))
+	c := framework.New(framework.WithDSQLEndpoint(db.Endpoint))
 	lambda.Start(c.Handle(migrate.Up(migrations)))
 }
 ```
