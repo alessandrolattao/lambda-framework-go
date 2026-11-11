@@ -9,12 +9,19 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// The queries of the job wait, on DSQL's sys.jobs view, whose final states
-// are completed and failed.
+// The statements of the job wait, on DSQL's sys.jobs view, whose final states
+// are completed and failed, and on its sys.wait_for_job, a procedure that
+// returns once the job is in one of them.
 const (
 	pendingJobsQuery = `SELECT job_id, job_type, coalesce(object_name, '') FROM sys.jobs WHERE status NOT IN ('completed', 'failed') ORDER BY start_time`
-	waitForJobQuery  = `SELECT sys.wait_for_job($1)`
-	jobDetailsQuery  = `SELECT coalesce(details, '') FROM sys.jobs WHERE job_id = $1`
+	waitForJobCall   = `CALL sys.wait_for_job($1)`
+	jobStatusQuery   = `SELECT status, coalesce(details, '') FROM sys.jobs WHERE job_id = $1`
+)
+
+// The final states of a job in sys.jobs.
+const (
+	statusCompleted = "completed"
+	statusFailed    = "failed"
 )
 
 // SQLSTATEs of a query on sys.jobs where there is no such view: Postgres.
@@ -23,11 +30,17 @@ const (
 	codeInvalidSchemaName = "3F000" // invalid_schema_name
 )
 
-// errJobFailed marks an asynchronous job that ended failed.
-var errJobFailed = errors.New("asynchronous job failed")
+var (
+	// errJobFailed marks an asynchronous job that ended failed.
+	errJobFailed = errors.New("asynchronous job failed")
+	// errJobNotEnded marks an asynchronous job that sys.jobs still lists as
+	// submitted or processing after sys.wait_for_job returned.
+	errJobNotEnded = errors.New("asynchronous job not ended after the wait")
+)
 
 // querier is the part of *pgxpool.Pool the job wait uses.
 type querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -50,15 +63,37 @@ func waitForJobs(ctx context.Context, db querier, migration string) error {
 		return fmt.Errorf("read the asynchronous jobs after migration %s: %w", migration, err)
 	}
 	for _, j := range jobs {
-		var succeeded bool
-		if err := db.QueryRow(ctx, waitForJobQuery, j.id).Scan(&succeeded); err != nil {
-			return fmt.Errorf("wait for %s job %s on %q after migration %s: %w", j.kind, j.id, j.object, migration, err)
-		}
-		if !succeeded {
-			return fmt.Errorf("%w: %s job %s on %q after migration %s: %s", errJobFailed, j.kind, j.id, j.object, migration, jobDetails(ctx, db, j.id))
+		if err := waitForJob(ctx, db, j, migration); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// waitForJob calls sys.wait_for_job on j, then reads from sys.jobs how j
+// ended, since what the call returns is not documented: a failed job fails
+// the run, with the details sys.jobs gives, and so does a job still submitted
+// or processing; a completed job, or one no longer listed, does not.
+func waitForJob(ctx context.Context, db querier, j job, migration string) error {
+	if _, err := db.Exec(ctx, waitForJobCall, j.id); err != nil {
+		return fmt.Errorf("wait for %s job %s on %q after migration %s: %w", j.kind, j.id, j.object, migration, err)
+	}
+	var status, details string
+	err := db.QueryRow(ctx, jobStatusQuery, j.id).Scan(&status, &details)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the status of %s job %s on %q after migration %s: %w", j.kind, j.id, j.object, migration, err)
+	}
+	switch status {
+	case statusCompleted:
+		return nil
+	case statusFailed:
+		return fmt.Errorf("%w: %s job %s on %q after migration %s: %s", errJobFailed, j.kind, j.id, j.object, migration, details)
+	default: // submitted or processing
+		return fmt.Errorf("%w: %s job %s on %q after migration %s: status %s", errJobNotEnded, j.kind, j.id, j.object, migration, status)
+	}
 }
 
 // pendingJobs reads the jobs not yet in a final state, the oldest first.
@@ -83,14 +118,4 @@ func pendingJobs(ctx context.Context, db querier) ([]job, error) {
 func noJobsView(err error) bool {
 	pgErr, ok := errors.AsType[*pgconn.PgError](err)
 	return ok && (pgErr.Code == codeUndefinedTable || pgErr.Code == codeInvalidSchemaName)
-}
-
-// jobDetails is the reason sys.jobs gives for a failed job, or why it could
-// not be read.
-func jobDetails(ctx context.Context, db querier, id string) string {
-	var details string
-	if err := db.QueryRow(ctx, jobDetailsQuery, id).Scan(&details); err != nil {
-		return fmt.Sprintf("no details: %v", err)
-	}
-	return details
 }
