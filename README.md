@@ -23,6 +23,7 @@ go get github.com/alessandrolattao/lambda-framework-go
 | `framework` | `Container` with the dependencies; `Get`/`Post`/`Put`/`Patch`/`Delete` and `HTTP` for API Gateway HTTP APIs; `Handle` and `Consume` for every other event; error and panic reporting |
 | `request`  | What typed binding does not cover: the JWT claims API Gateway verified, the client IP behind trusted proxies, comma-separated id lists |
 | `response` | The error envelope, success responses with cache headers, CSV and content negotiation |
+| `migrate`  | The business handler of a migration Lambda: goose SQL migrations on Aurora DSQL (or Postgres) |
 
 ## Quick start
 
@@ -307,6 +308,118 @@ func main() {
 }
 ```
 
+## Migrations
+
+Each database gets a migration Lambda: a `main` package that embeds its goose
+SQL files and hands `migrate.Up` to `Handle`. The code that runs them is in
+the framework; the Lambda brings only its SQL.
+
+```go
+package main
+
+import (
+	"embed"
+
+	"github.com/aws/aws-lambda-go/lambda"
+
+	"github.com/alessandrolattao/lambda-framework-go/framework"
+	"github.com/alessandrolattao/lambda-framework-go/migrate"
+)
+
+//go:embed *.sql
+var migrations embed.FS
+
+func main() {
+	c := framework.New()
+	lambda.Start(c.Handle(migrate.Up(migrations)))
+}
+```
+
+It is a business handler like any other: it gets the container's logging,
+tracing, error reporting and pool, and connects as the container does, to
+DSQL with `WithDSQLEndpoint` or `DSQL_ENDPOINT`, in the region in
+`AWS_REGION`, as `admin` with an IAM token. Every invocation, whatever its
+payload, applies the migrations the database has not applied yet, up to the
+latest, and answers with what it did:
+
+```json
+{"version": 3, "applied": [2, 3]}
+```
+
+An invocation with nothing new applies nothing and succeeds. goose logs
+through the container's logger, at Info, every statement it runs and every
+migration it applies (`logger=goose`): the logs of a failed deploy show its
+last statement. Migrations go up only: no `Down` section runs, and there are no Go migrations. `migrate` is a
+package of its own, which `framework` does not import: goose is linked into
+the migration Lambdas only, and the other Lambdas keep their size and their
+cold start.
+
+What DSQL asks of a migration:
+
+- **`-- +goose NO TRANSACTION` in every file.** A DSQL transaction holds at
+  most one DDL statement, and never DDL together with DML. Without a
+  transaction around the file, each statement is a transaction of its own.
+  `Up` checks every file before it applies anything, and fails naming the
+  files without the annotation.
+
+  ```sql
+  -- +goose NO TRANSACTION
+  -- +goose Up
+  CREATE TABLE orders (id uuid PRIMARY KEY, total bigint NOT NULL);
+  CREATE INDEX ASYNC orders_total ON orders (total);
+  ```
+
+- **`CREATE INDEX ASYNC`** is how DSQL creates an index: it returns at once
+  and builds the index in a job. After each migration `Up` waits, with
+  `sys.wait_for_job`, for every asynchronous job not yet completed, so the next
+  migration finds the schema complete; a job that ends failed fails the
+  invocation, naming the job and the migration.
+- **Conflicts are retried.** A statement that loses an optimistic concurrency
+  conflict (SQLSTATE `40001`, `OC000`, `OC001`) committed nothing, and runs
+  again, up to 5 times, after a random wait of at most 100 ms, then 200 ms,
+  doubling, never more than 3 seconds. A migration that still fails fails the
+  invocation: the migrations before it stay applied, and the next invocation
+  starts from the one that failed. So does the deploy that invoked it.
+- **The role needs `dsql:DbConnectAdmin`** on the cluster: migrations change
+  the schema as `admin`.
+- **The timeout covers the job waits.** An index build on a large table takes
+  minutes: give the function a timeout above the longest one (Lambda allows up
+  to 15 minutes).
+- **Runs never overlap.** There is no lock (DSQL has no advisory locks):
+  invoke the migration Lambda once per deploy and wait for its answer before
+  the next deploy.
+
+On Postgres the same Lambda works with `DATABASE_URL`; there is no `sys.jobs`
+there, and the job wait is skipped.
+
+### With SST
+
+Link the cluster to the migration function, as to any other, and give it a
+timeout for the index builds. Invoking it on each deploy is up to your
+infrastructure.
+
+```ts
+const database = new sst.aws.Dsql("Database");
+
+new sst.aws.Function("OrdersMigrations", {
+  handler: "./cmd/orders-migrations",
+  runtime: "go",
+  link: [database],
+  timeout: "15 minutes",
+});
+```
+
+```go
+func main() {
+	endpoint, err := resource.Get("Database", "endpoint")
+	if err != nil {
+		panic(err)
+	}
+	c := framework.New(framework.WithDSQLEndpoint(fmt.Sprint(endpoint)))
+	lambda.Start(c.Handle(migrate.Up(migrations)))
+}
+```
+
 ## Testing a handler
 
 Build a `Container` by hand with fakes in its fields and call the business
@@ -338,6 +451,12 @@ without a database. To run them:
 docker run -d --rm -e POSTGRES_PASSWORD=postgres -p 55432:5432 postgres:18-alpine
 TEST_DATABASE_URL='postgres://postgres:postgres@localhost:55432/postgres?sslmode=disable' go test ./...
 ```
+
+The migration tests run goose on that Postgres, each in a schema of its own,
+and skip without `TEST_DATABASE_URL`. One of them needs a real Aurora DSQL
+cluster, because only DSQL has `CREATE INDEX ASYNC` and its jobs: it runs
+with the cluster endpoint in `TEST_DSQL_ENDPOINT` and AWS credentials allowed
+`dsql:DbConnectAdmin` on it, and skips without them.
 
 The parsers that read what a client sends have fuzz tests; `go test` runs
 their seeds, and fuzzing one goes like this:
