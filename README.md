@@ -346,8 +346,10 @@ latest, and answers with what it did:
 {"version": 3, "applied": [2, 3]}
 ```
 
-An invocation with nothing new applies nothing and succeeds. Migrations go up
-only: no `Down` section runs, and there are no Go migrations. `migrate` is a
+An invocation with nothing new applies nothing and succeeds. goose logs
+through the container's logger, at Info, every statement it runs and every
+migration it applies (`logger=goose`): the logs of a failed deploy show its
+last statement. Migrations go up only: no `Down` section runs, and there are no Go migrations. `migrate` is a
 package of its own, which `framework` does not import: goose is linked into
 the migration Lambdas only, and the other Lambdas keep their size and their
 cold start.

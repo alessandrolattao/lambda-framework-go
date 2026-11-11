@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -183,6 +184,8 @@ func tableExists(t *testing.T, c *framework.Container, table string) bool {
 func TestUp_OnPostgres_AppliesTheMigrationsThenNothing(t *testing.T) {
 	t.Parallel()
 	c := postgresContainer(t)
+	var logs bytes.Buffer
+	c.Logger = logging.New(logging.WithWriter(&logs))
 	ctx := testContext(t)
 	h := c.Handle(Up(migrations(map[string]string{
 		"00001_orders.sql":    noTx + "CREATE TABLE orders (id bigint PRIMARY KEY, total bigint NOT NULL);\nCREATE INDEX orders_total ON orders (total);\n",
@@ -193,6 +196,11 @@ func TestUp_OnPostgres_AppliesTheMigrationsThenNothing(t *testing.T) {
 	out, err := h.Invoke(ctx, []byte(`{"source":"deploy"}`))
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"version":3,"applied":[1,2,3]}`, string(out))
+	// goose logs through the container's logger: every statement, every
+	// migration.
+	assert.Contains(t, logs.String(), `"logger":"goose"`)
+	assert.Contains(t, logs.String(), "INSERT INTO orders VALUES (1, 42)")
+	assert.Equal(t, 3, strings.Count(logs.String(), `"message":"migration completed"`), logs.String())
 
 	var total int64
 	require.NoError(t, c.DB.QueryRow(ctx, "SELECT total FROM orders WHERE id = 1").Scan(&total))

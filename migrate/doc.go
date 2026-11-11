@@ -33,7 +33,10 @@
 //
 //	{"version": 3, "applied": [2, 3]}
 //
-// An invocation with nothing new to apply applies nothing and succeeds.
+// An invocation with nothing new to apply applies nothing and succeeds. goose
+// logs through the container's logger, at Info: every statement it runs and
+// every migration it applies, so the logs of a failed deploy show its last
+// statement.
 //
 // # Migrations on DSQL
 //

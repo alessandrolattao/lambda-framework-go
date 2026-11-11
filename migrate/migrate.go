@@ -76,7 +76,10 @@ func up(ctx context.Context, c *framework.Container, fsys fs.FS, b backoff) (_ R
 	provider, err := goose.NewProvider(goose.DialectAuroraDSQL, db, fsys,
 		goose.WithIsolateDDL(true),
 		goose.WithDisableGlobalRegistry(true),
+		// One record per statement and per migration: a run happens once per
+		// deploy, and the logs show the last statement of a failed one.
 		goose.WithSlog(logger(c)),
+		goose.WithVerbose(true),
 	)
 	if err != nil {
 		return Result{}, fmt.Errorf("read the migrations: %w", err)
