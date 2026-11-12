@@ -98,7 +98,7 @@ type streamWriterKey struct{}
 // metrics are written before Lambda considers the invocation done.
 func (s *streamer) start(ctx context.Context, req events.APIGatewayProxyRequest) (io.Reader, error) {
 	reader, pipe := io.Pipe()
-	w := &streamWriter{pipe: pipe, header: http.Header{}}
+	w := &streamWriter{pipe: pipe, header: http.Header{}, origin: s.c.corsOrigin(req)}
 	go func() {
 		defer pipe.Close() //nolint:errcheck // closing a PipeWriter always succeeds
 		if _, err := s.run(context.WithValue(ctx, streamWriterKey{}, w), req); err != nil {
@@ -158,9 +158,10 @@ func answerBeforeFirstByte(w *streamWriter, err error) error {
 type streamWriter struct {
 	pipe   *io.PipeWriter
 	header http.Header
-	status int   // the status WriteHeader set, then the status sent
-	sent   bool  // whether the metadata has gone out
-	err    error // what sending the metadata failed with
+	origin string // the origin the metadata allows (CORS), "" for none
+	status int    // the status WriteHeader set, then the status sent
+	sent   bool   // whether the metadata has gone out
+	err    error  // what sending the metadata failed with
 }
 
 var (
@@ -209,8 +210,9 @@ func (w *streamWriter) FlushError() error {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	prelude, err := json.Marshal(newStreamMetadata(w.status, w.header),
-		json.Deterministic(true), jsontext.AllowInvalidUTF8(true))
+	metadata := newStreamMetadata(w.status, w.header)
+	metadata.Headers = allowOrigin(w.origin, metadata.Headers, metadata.MultiValueHeaders)
+	prelude, err := json.Marshal(metadata, json.Deterministic(true), jsontext.AllowInvalidUTF8(true))
 	if err != nil {
 		w.err = fmt.Errorf("encode the stream metadata: %w", err)
 		return w.err

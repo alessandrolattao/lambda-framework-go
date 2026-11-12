@@ -49,6 +49,7 @@ type Container struct {
 	awsConfig      aws.Config
 	databaseURL    string
 	dsqlEndpoint   string
+	corsOrigins    []string
 	trustedProxies int
 	service        string
 	loggingOpts    []logging.Option
@@ -171,6 +172,7 @@ func New(opts ...Option) *Container {
 	c := &Container{
 		databaseURL:  os.Getenv("DATABASE_URL"),
 		dsqlEndpoint: os.Getenv("DSQL_ENDPOINT"),
+		corsOrigins:  parseOrigins(os.Getenv("CORS_ALLOW_ORIGINS")),
 		service:      defaultService(),
 		lifecycle:    &lifecycle{},
 	}
