@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/alessandrolattao/lambda-framework-go/internal/clientip"
 	"github.com/alessandrolattao/lambda-framework-go/request"
 )
 
@@ -205,6 +206,12 @@ func defaultService() string {
 // trusted proxies set with WithTrustedProxies.
 func (c *Container) clientIP(r *events.APIGatewayV2HTTPRequest) string {
 	return request.ClientIP(r, c.trustedProxies)
+}
+
+// restClientIP is clientIP for a REST API request: the same rule, on
+// requestContext.identity.sourceIp.
+func (c *Container) restClientIP(r *events.APIGatewayProxyRequest) string {
+	return clientip.REST(r, c.trustedProxies)
 }
 
 // Close releases what the container holds open: the database pool, and the

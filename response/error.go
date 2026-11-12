@@ -143,16 +143,35 @@ func (e *Error) Write(w http.ResponseWriter) {
 	_, _ = w.Write(body) //nolint:errcheck // the client went away; there is nobody left to tell
 }
 
-// APIGatewayV2 returns the envelope of e as an API Gateway HTTP API response,
-// for a handler that answers the event itself rather than through a router.
+// APIGatewayV2 returns the envelope of e as an API Gateway HTTP API response
+// (payload format 2.0), for a handler that answers the event itself rather
+// than through a router.
 func (e *Error) APIGatewayV2() events.APIGatewayV2HTTPResponse {
 	status, body := e.encode()
 	return events.APIGatewayV2HTTPResponse{
 		StatusCode: status,
 		Body:       string(body),
-		Headers: map[string]string{
-			headerContentType:  contentTypeJSON,
-			headerCacheControl: noStore,
-		},
+		Headers:    envelopeHeaders(),
+	}
+}
+
+// APIGatewayProxy returns the envelope of e as an API Gateway REST API
+// response (Lambda proxy integration, payload format 1.0), for a handler that
+// answers the event itself rather than through a router.
+func (e *Error) APIGatewayProxy() events.APIGatewayProxyResponse {
+	status, body := e.encode()
+	return events.APIGatewayProxyResponse{
+		StatusCode: status,
+		Body:       string(body),
+		Headers:    envelopeHeaders(),
+	}
+}
+
+// envelopeHeaders are the headers of an envelope answered as an API Gateway
+// response: JSON, never cached.
+func envelopeHeaders() map[string]string {
+	return map[string]string{
+		headerContentType:  contentTypeJSON,
+		headerCacheControl: noStore,
 	}
 }

@@ -22,18 +22,20 @@ import (
 // is written, since its payload carries verification codes and challenge
 // answers.
 func logEvent(ctx context.Context, logger *slog.Logger, event any) {
-	switch e := event.(type) {
-	case events.APIGatewayV2HTTPRequest:
+	if r, api := describeAPI(event); api {
 		logger.InfoContext(ctx, "API request received")
 		logger.DebugContext(ctx, "API request details",
-			"method", e.RequestContext.HTTP.Method,
-			"path", e.RawPath,
-			"routeKey", e.RouteKey,
-			"pathParameters", e.PathParameters,
-			"queryStringParameters", e.QueryStringParameters,
-			"headers", redactHeaders(e.Headers),
-			"body", e.Body,
+			"method", r.method,
+			"path", r.path,
+			"routeKey", r.routeKey,
+			"pathParameters", r.pathParameters,
+			"queryStringParameters", r.queryStringParameters,
+			"headers", redactHeaders(r.headers),
+			"body", r.body,
 		)
+		return
+	}
+	switch e := event.(type) {
 	case events.APIGatewayWebsocketProxyRequest:
 		logger.DebugContext(ctx, "processing WebSocket event",
 			"routeKey", e.RequestContext.RouteKey,

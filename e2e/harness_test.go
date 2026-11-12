@@ -1,4 +1,4 @@
-// Package e2e runs the framework the way Lambda does. The two functions in
+// Package e2e runs the framework the way Lambda does. The functions in
 // lambdas/ are built for linux/amd64 and run in the Lambda base image, under
 // the Runtime Interface Emulator, with the CPU and memory Lambda would give
 // them. Postgres runs next to them on a Docker network, and a UDP listener on
@@ -47,6 +47,7 @@ const (
 	lambdaMBPerVCPU = 1769
 
 	ordersAPI    = "orders-api"
+	ordersREST   = "orders-rest"
 	ordersEvents = "orders-events"
 )
 
@@ -96,7 +97,7 @@ func setUp(ctx context.Context) (teardown func(), err error) {
 	cleanups = append(cleanups, func() { warn(os.RemoveAll(buildDir)) })
 
 	suite.binaries = map[string]binary{}
-	for _, name := range []string{ordersAPI, ordersEvents} {
+	for _, name := range []string{ordersAPI, ordersREST, ordersEvents} {
 		bin, buildErr := build(ctx, name, buildDir)
 		if buildErr != nil {
 			return teardown, buildErr

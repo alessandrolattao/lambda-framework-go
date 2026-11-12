@@ -5,6 +5,8 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/alessandrolattao/lambda-framework-go/internal/clientip"
 )
 
 // The addresses the ClientIP cases use: the real client, and the CloudFront
@@ -32,7 +34,7 @@ func TestClientIP(t *testing.T) {
 		},
 		{
 			name: "no trusted proxy and no peer",
-			want: unknownIP,
+			want: clientip.Unknown,
 		},
 		{
 			name:    "behind CloudFront, API Gateway appended its peer",

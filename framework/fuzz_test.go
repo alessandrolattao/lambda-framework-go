@@ -40,3 +40,33 @@ func FuzzInvoke(f *testing.F) {
 		}
 	})
 }
+
+// FuzzInvokeREST is FuzzInvoke for a REST API handler.
+func FuzzInvokeREST(f *testing.F) {
+	f.Add([]byte(`{"resource":"/orders/{id}","path":"/orders/42","httpMethod":"GET"}`))
+	f.Add([]byte(`{"requestContext":{"authorizer":{"claims":{"sub":"x","exp":1700000000}}}}`))
+	f.Add([]byte(`[1,2,3]`))
+	f.Add([]byte(`"just a string"`))
+	f.Add([]byte(`{"headers":{"a":"b","a":"c"}}`))
+	f.Add([]byte{0xff, 0xfe})
+
+	c := &Container{Logger: quietLogger()}
+	h := c.Handle(func(context.Context, *Container, events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
+	})
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		out, err := h.Invoke(context.Background(), payload)
+		if err != nil {
+			failure, ok := errors.AsType[messages.InvokeResponse_Error](err)
+			if !ok || failure.Type != errorTypeInvalidEvent {
+				t.Fatalf("a payload that does not decode must fail as InvalidEvent, got %#v", err)
+			}
+			return
+		}
+		var resp events.APIGatewayProxyResponse
+		if json.Unmarshal(out, &resp) != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("decoded payload %q answered %q", payload, out)
+		}
+	})
+}

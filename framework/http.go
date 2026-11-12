@@ -86,6 +86,26 @@ func (c *Container) HTTP() Handler[events.APIGatewayV2HTTPRequest, events.APIGat
 	})
 }
 
+// REST returns the Lambda handler serving the container's router to an API
+// Gateway REST API with a Lambda proxy integration (payload format 1.0): the
+// same routes as HTTP, so moving a Lambda from an HTTP API to a REST API
+// changes only the line that starts it:
+//
+//	c.Get("/orders/{id}", getOrder)
+//	lambda.Start(c.REST())
+//
+// A REST API request gets what an HTTP API request gets: the "API request
+// received" and "API request completed" records, the request described on
+// the invocation's span, client_ip and ClientIP, and the 500 envelope for a
+// failure no error handler answered. The claim functions of package request
+// read the claims of a Cognito user pool authorizer.
+func (c *Container) REST() Handler[events.APIGatewayProxyRequest, events.APIGatewayProxyResponse] {
+	serve := eventhandler.APIGatewayREST(c.Router())
+	return c.Handle(func(ctx context.Context, _ *Container, r events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+		return serve(ctx, r)
+	})
+}
+
 // newRouter builds the container's router: JSON as the response package
 // writes it, and every error the router answers in the error envelope.
 func (c *Container) newRouter() *eventhandler.Router {
@@ -175,13 +195,15 @@ func validationCode(details []eventhandler.ValidationErrorDetail) string {
 
 // ClientIP returns the address of the client that called the API, looking
 // past the trusted proxies set with WithTrustedProxies, for the request ctx
-// belongs to; "" outside an API Gateway HTTP API request.
+// belongs to; "" outside an API Gateway request (HTTP API or REST API).
 func (c *Container) ClientIP(ctx context.Context) string {
-	r, ok := eventhandler.APIGatewayHTTPEvent(ctx)
-	if !ok {
-		return ""
+	if r, ok := eventhandler.APIGatewayHTTPEvent(ctx); ok {
+		return c.clientIP(&r)
 	}
-	return c.clientIP(&r)
+	if r, ok := eventhandler.APIGatewayRESTEvent(ctx); ok {
+		return c.restClientIP(&r)
+	}
+	return ""
 }
 
 // errUnhandled is the envelope of a failure no error handler answered.

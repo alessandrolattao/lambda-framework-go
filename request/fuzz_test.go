@@ -7,11 +7,13 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+
+	"github.com/alessandrolattao/lambda-framework-go/internal/clientip"
 )
 
 // FuzzClientIP checks that whatever a client writes in X-Forwarded-For, the
-// answer is an address, the peer API Gateway saw, or unknownIP: never the
-// client's text.
+// answer is an address, the peer API Gateway saw, or clientip.Unknown: never
+// the client's text.
 func FuzzClientIP(f *testing.F) {
 	f.Add("1.2.3.4, 203.0.113.7, 198.51.100.9", "198.51.100.9", 1)
 	f.Add("203.0.113.7:51234", "198.51.100.9", 1)
@@ -27,7 +29,7 @@ func FuzzClientIP(f *testing.F) {
 			},
 		}
 		got := ClientIP(r, proxies%5)
-		if got == unknownIP || got == sourceIP {
+		if got == clientip.Unknown || got == sourceIP {
 			return
 		}
 		if _, err := netip.ParseAddr(got); err != nil {

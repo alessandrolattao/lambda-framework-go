@@ -57,6 +57,21 @@ func ExampleContainer_HTTP() {
 	// 404 <nil>
 }
 
+func ExampleContainer_REST() {
+	c := framework.New(framework.WithLogging(logging.WithWriter(io.Discard)))
+	c.Get("/orders/{id}", getOrder) // the same routes as behind an HTTP API
+	h := c.REST()                   // in main: lambda.Start(h)
+
+	for _, path := range []string{"/orders/0b6f5c1e-4b8e-4f2a-9c3d-2a1b0c9d8e7f", "/orders/42", "/invoices"} {
+		resp, err := h.Call(context.Background(), events.APIGatewayProxyRequest{HTTPMethod: "GET", Path: path})
+		fmt.Println(resp.StatusCode, err)
+	}
+	// Output:
+	// 200 <nil>
+	// 422 <nil>
+	// 404 <nil>
+}
+
 func ExampleContainer_Consume() {
 	c := framework.New(framework.WithLogging(logging.WithWriter(io.Discard)))
 	h := c.Consume(handleOrderPlaced) // in main: lambda.Start(h)
