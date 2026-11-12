@@ -42,6 +42,47 @@ func TestErrorType(t *testing.T) {
 	}
 }
 
+func TestErrorType_ARejectionIsNamedAsTheErrorItMarks(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"an application's own type", fmt.Errorf("check sign-up: %w", &validationError{field: "email"}), "validationError"},
+		{"a library's type", &pgconn.PgError{Code: "23505"}, "PgError"},
+		{"a plain error", errDisposable, errorTypeHandler},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, err := range []error{tc.err, Reject(tc.err), fmt.Errorf("wrapped: %w", Reject(tc.err))} {
+				assert.Equal(t, tc.want, errorType(err, errorTypeHandler),
+					"%q: Step Functions matches its Retry and Catch rules on it", err)
+			}
+		})
+	}
+}
+
+func TestHandle_TheRuntimeGetsARejectionAsTheErrorItMarks(t *testing.T) {
+	t.Parallel()
+
+	c := &Container{Logger: quietLogger()}
+	invoke := func(err error) messages.InvokeResponse_Error {
+		_, got := c.Handle(func(context.Context, *Container, jsontext.Value) (any, error) {
+			return nil, err
+		}).Invoke(lambdaContext(t), []byte(`{}`))
+		failure, ok := errors.AsType[messages.InvokeResponse_Error](got)
+		require.True(t, ok)
+		return failure
+	}
+
+	for _, err := range []error{&validationError{field: "email"}, errDisposable} {
+		assert.Equal(t, invoke(err), invoke(Reject(err)), "the same message and the same errorType")
+	}
+}
+
 func TestRuntimeLog(t *testing.T) {
 	t.Parallel()
 

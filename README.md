@@ -393,7 +393,8 @@ the framework's `Access-Control-Allow-Origin` replaces the router's.
 - **One door for failures.** Return the error and log nothing: the framework
   writes it once, at Error, with the request id. Wrap the context only the
   handler knows into the error (`fmt.Errorf("charge order %v: %w", id, err)`).
-  A panic is written down with its stack.
+  A panic is written down with its stack. A refusal the handler means is
+  written at Warn instead (see [Expected rejections](#expected-rejections)).
 - **Failures Lambda can tell apart.** A failure reaches Lambda (and Step
   Functions, which matches Retry and Catch rules on it) with an `errorType`
   that means something: the type of the application's or library's error in
@@ -422,6 +423,39 @@ the framework's `Access-Control-Allow-Origin` replaces the router's.
   annotations); a 5xx marks both spans as failed. Open your own spans with
   `c.Tracer.Capture(ctx, name, fn)`. Turn on active tracing on the function:
   without an X-Ray endpoint, tracing is off.
+
+### Expected rejections
+
+A handler that refuses an event on purpose returns `framework.Reject(err)`: a
+Cognito trigger turning down a sign-up (a failed anti-robot check, a
+disposable email), any `Handle` or `Consume` handler of an event that is not
+an API Gateway request and says no as part of its job.
+
+```go
+lambda.Start(c.Handle(func(ctx context.Context, c *framework.Container, e events.CognitoEventUserPoolsPreSignup) (events.CognitoEventUserPoolsPreSignup, error) {
+	if disposable(e.Request.UserAttributes["email"]) {
+		return e, framework.Reject(errors.New("disposable email"))
+	}
+	return e, nil
+}))
+```
+
+The caller receives the error as it would without `Reject`: the same message
+(Cognito refuses the sign-up with it), the same `errorType` in Lambda, so Step
+Functions Retry and Catch rules keep matching, and `errors.Is` and `errors.As`
+reach the error inside. Only the record changes: `handler rejected the event`,
+at Warn instead of Error, so that the alerting on the error logs does not fire
+for a refusal the handler meant. Its `exception` is the message and its
+`exception_name` the error's own type, as without `Reject`. A rejection
+wrapped further (`fmt.Errorf("check sign-up: %w", rejection)`) is still one. A
+consumer's rejection still fails the event: Lambda retries it, and it may
+reach the DLQ.
+
+Routes do not use it: a route answers an expected failure with a 4xx of
+package `response` (`response.Forbidden(...)`, `response.Conflict(...)`), which
+leaves only its `API request completed` record. So do a `Stream` and a
+`Handle` handler of an API Gateway request. A `Reject` any of them returns is
+a failure like any other: it answers the 500 envelope and is written at Error.
 
 ## Configuration
 

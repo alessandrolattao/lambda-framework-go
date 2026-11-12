@@ -28,10 +28,15 @@ func toRuntime(err error, typ string) error {
 
 // errorType names a handler's failure: the type of the first error in the
 // chain that an application or a library defined (a PgError, a
-// ValidationError), or else fallback.
+// ValidationError), or else fallback. The mark of Reject is skipped, so a
+// rejection is named as the same error would be without it: Step Functions
+// matches its Retry and Catch rules on the name.
 func errorType(err error, fallback string) string {
 	for e := err; e != nil; e = errors.Unwrap(e) {
 		t := reflect.TypeOf(e)
+		if t == reflect.TypeFor[*rejectionError]() {
+			continue
+		}
 		if t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
@@ -49,9 +54,9 @@ func errorType(err error, fallback string) string {
 //
 // aws-lambda-go writes every failure it reports to Lambda, unconditionally.
 // Every failure that leaves a Handler or a Consumer has already been written
-// down at Error by the framework, with its request id, so that copy goes to
-// Debug: invisible by default on AWS, there when debugging. Anything else it
-// writes is kept at Info.
+// down by the framework, with its request id, at Error or, for a rejection
+// (see Reject), at Warn, so that copy goes to Debug: invisible by default on
+// AWS, there when debugging. Anything else it writes is kept at Info.
 type runtimeLog struct {
 	logger *slog.Logger
 }
