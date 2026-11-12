@@ -3,10 +3,8 @@ package framework
 import (
 	"context"
 	"net/http"
-	"strings"
 
 	"github.com/alessandrolattao/powertools-lambda-go/tracing"
-	"github.com/aws/aws-lambda-go/events"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
@@ -17,20 +15,16 @@ import (
 // block: the console's http.status and http.url filters work, and a 5xx is a
 // fault. Route and status are indexed as annotations too (http_route,
 // http_status), so traces can be searched and grouped by route.
-func annotateAPI(ctx context.Context, r *events.APIGatewayV2HTTPRequest, status int, clientIP string) {
-	route := r.RouteKey // "$default" has no method in front
-	if _, path, found := strings.Cut(r.RouteKey, " "); found {
-		route = path
-	}
+func annotateAPI(ctx context.Context, r *apiCall, status int, clientIP string) {
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(
-		semconv.HTTPRequestMethodKey.String(r.RequestContext.HTTP.Method),
-		semconv.HTTPRoute(route),
-		semconv.URLPath(r.RawPath),
+		semconv.HTTPRequestMethodKey.String(r.method),
+		semconv.HTTPRoute(r.route),
+		semconv.URLPath(r.path),
 		semconv.HTTPResponseStatusCode(status),
 		semconv.ClientAddress(clientIP),
 	)
-	tracing.PutAnnotation(ctx, "http_route", route)
+	tracing.PutAnnotation(ctx, "http_route", r.route)
 	tracing.PutAnnotation(ctx, "http_status", status)
 	if status >= http.StatusInternalServerError {
 		span.SetStatus(codes.Error, http.StatusText(status))

@@ -20,8 +20,8 @@ go get github.com/alessandrolattao/lambda-framework-go
 
 | Package    | What it does |
 |------------|--------------|
-| `framework` | `Container` with the dependencies; `Get`/`Post`/`Put`/`Patch`/`Delete` and `HTTP` for API Gateway HTTP APIs; `Handle` and `Consume` for every other event; error and panic reporting |
-| `request`  | What typed binding does not cover: the JWT claims API Gateway verified, the client IP behind trusted proxies, comma-separated id lists |
+| `framework` | `Container` with the dependencies; `Get`/`Post`/`Put`/`Patch`/`Delete`, then `HTTP` for API Gateway HTTP APIs or `REST` for REST APIs; `Handle` and `Consume` for every other event; error and panic reporting |
+| `request`  | What typed binding does not cover: the claims API Gateway's authorizer verified, the client IP behind trusted proxies, comma-separated id lists |
 | `response` | The error envelope, success responses with cache headers, CSV and content negotiation |
 | `migrate`  | The business handler of a migration Lambda: goose SQL migrations on Aurora DSQL (or Postgres) |
 | `sst`      | The resources SST links to a Lambda: the value of an `sst.Secret`, the properties of any other component |
@@ -95,6 +95,98 @@ lambda.Start(c.Consume(func(ctx context.Context, c *framework.Container, e event
 
 The other Powertools utilities (batch, idempotency, parameters, feature flags,
 validation, parser...) work inside these handlers as they do anywhere.
+
+## REST API
+
+The routes serve an API Gateway REST API with a Lambda proxy integration
+(payload format 1.0) as they serve an HTTP API: moving a Lambda from one to
+the other changes only the line that starts it.
+
+```go
+func main() {
+	c := framework.New()
+	c.Get("/orders/{id}", getOrder)
+	lambda.Start(c.REST())
+}
+```
+
+An HTTP API is cheaper and faster; choose a REST API when the API needs what
+only REST APIs offer, response streaming (server-sent events) for one. `REST`
+answers each request with one buffered response, as `HTTP` does.
+
+A REST API request gets what an HTTP API request gets: the same binding,
+validation, responses and error envelope, the 500 envelope for a failure, the
+`API request received` and `API request completed` records, the span, and
+`client_ip`. In the records `routeKey` is the method and the resource
+(`GET /orders/{id}`); on the span the route is the resource and the path is
+the request path. `c.ClientIP(ctx)` reads `requestContext.identity.sourceIp`
+and `X-Forwarded-For`, with the trusted proxies of `WithTrustedProxies`, as
+behind an HTTP API.
+
+### Cognito user pool authorizer
+
+The REST API counterpart of an HTTP API's JWT authorizer is a Cognito user
+pool authorizer. It verifies the token in the `Authorization` header (the ID
+token; the access token when the route sets scopes) and hands its claims to
+the function in `requestContext.authorizer.claims`. `request.Claims`,
+`request.Claim` and `request.UserID` read them as they read the JWT claims of
+an HTTP API:
+
+```go
+func getProfile(ctx context.Context, c *framework.Container, _ struct{}) (profile, error) {
+	userID, err := request.UserID(ctx) // the userId claim
+	if err != nil {
+		return profile{}, response.Unauthorized("unauthorized", "no user in the token", nil)
+	}
+	...
+}
+```
+
+Every claim is a string, as behind an HTTP API: a claim the authorizer hands
+over as a number, a boolean, an array or an object is its JSON text
+(`1700000000` is `"1700000000"`), and a `null` claim is missing. Without
+claims (no authorizer, or a Lambda authorizer, whose context is not read) the
+functions answer `request.ErrClaimsNotFound`.
+
+### With SST
+
+One Lambda serves every route of the router, behind a proxy resource;
+`api.deploy()` comes after the routes.
+
+```ts
+const userPool = new sst.aws.CognitoUserPool("UserPool");
+const database = new sst.aws.Dsql("Database");
+
+const api = new sst.aws.ApiGatewayV1("Api");
+const cognito = api.addAuthorizer({
+  name: "Cognito",
+  userPools: [userPool.arn],
+});
+api.route(
+  "ANY /{proxy+}",
+  { handler: "./cmd/orders", runtime: "go", link: [database] },
+  { auth: { cognito: { authorizer: cognito.id } } },
+);
+api.deploy();
+```
+
+```go
+func main() {
+	var db struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := sst.Get("Database", &db); err != nil {
+		panic(err)
+	}
+	c := framework.New(framework.WithDSQLEndpoint(db.Endpoint))
+	c.Get("/orders/{id}", getOrder)
+	lambda.Start(c.REST())
+}
+```
+
+Behind the proxy resource every request has the resource `/{proxy+}`, which
+is then the `routeKey` of the records and the route of the span; a route of
+its own (`api.route("GET /orders/{id}", ...)`) keeps them apart.
 
 ## What happens around a handler
 
@@ -473,8 +565,8 @@ got, err := getOrder(t.Context(), c, orderID{ID: id})
 ```
 
 To go through the framework as well, routing and validation included, call the
-Lambda handler with an event: `c.HTTP().Call(ctx, request)`, or
-`c.Handle(h).Call(ctx, event)`.
+Lambda handler with an event: `c.HTTP().Call(ctx, request)`,
+`c.REST().Call(ctx, request)`, or `c.Handle(h).Call(ctx, event)`.
 
 ## Development
 
@@ -509,8 +601,9 @@ go test -run '^$' -fuzz '^FuzzClientIP$' -fuzztime 1m ./request
 ### End-to-end tests
 
 `e2e/` is a module of its own (so its test dependencies stay out of this
-one) that runs two real Lambdas, an API Gateway HTTP API one and an
-EventBridge one, the way Lambda does: built for `provided.al2023`, run in the
+one) that runs real Lambdas, the orders API behind an API Gateway HTTP API
+and behind a REST API (the same routes, in `e2e/lambdas/orders`) and an
+EventBridge consumer, the way Lambda does: built for `provided.al2023`, run in the
 Lambda base image under the Runtime Interface Emulator, with the memory and
 the CPU share of a Lambda size. Postgres runs next to them (Aurora DSQL has no
 local version, so the suite runs on Postgres), and a UDP listener
@@ -520,7 +613,7 @@ ones. It needs Docker.
 
 ```sh
 cd e2e
-go test -run TestOrders ./...   # behaviour, about 15 s
+go test -run TestOrders ./...   # behaviour, on HTTP API and REST API events
 go test ./...                   # plus startup times at 128, 512 and 1024 MB, about 100 s
 ```
 

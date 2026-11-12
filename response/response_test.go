@@ -61,6 +61,7 @@ func TestErrorKeepsItsCause(t *testing.T) {
 	require.ErrorIs(t, err, errDatabase)
 	assert.Contains(t, err.Error(), "connection refused")
 	assert.NotContains(t, err.APIGatewayV2().Body, "connection refused", "the cause never reaches the client")
+	assert.NotContains(t, err.APIGatewayProxy().Body, "connection refused", "not behind a REST API either")
 }
 
 func TestErrorWrite(t *testing.T) {
@@ -88,6 +89,30 @@ func TestErrorAPIGatewayV2(t *testing.T) {
 	assert.Nil(t, body.Details, "details are omitted when there are none")
 }
 
+func TestErrorAPIGatewayProxy(t *testing.T) {
+	t.Parallel()
+	resp := BadRequest("invalidTotal", "the total must be positive", nil).APIGatewayProxy()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Headers["Content-Type"])
+	assert.Equal(t, "no-store", resp.Headers["Cache-Control"])
+	body := decode(t, resp.Body)
+	assert.Equal(t, "invalidTotal", body.Code)
+	assert.Nil(t, body.Details, "details are omitted when there are none")
+	assertTimestampRFC3339UTC(t, body.Timestamp)
+}
+
+func TestErrorTheSameEnvelopeBehindBothAPITypes(t *testing.T) {
+	t.Parallel()
+	err := NotFound("orderNotFound", "no order 42", map[string]int{"id": 42})
+	httpAPI, restAPI := err.APIGatewayV2(), err.APIGatewayProxy()
+	assert.Equal(t, httpAPI.StatusCode, restAPI.StatusCode)
+	assert.Equal(t, httpAPI.Headers, restAPI.Headers)
+	httpBody, restBody := decode(t, httpAPI.Body), decode(t, restAPI.Body)
+	assert.Equal(t, httpBody.Code, restBody.Code)
+	assert.Equal(t, httpBody.Message, restBody.Message)
+	assert.Equal(t, httpBody.Details, restBody.Details)
+}
+
 func TestErrorDetailsThatCannotBeEncodedAreDropped(t *testing.T) {
 	t.Parallel()
 	resp := BadRequest("invalid", "bad", math.NaN()).APIGatewayV2()
@@ -95,6 +120,10 @@ func TestErrorDetailsThatCannotBeEncodedAreDropped(t *testing.T) {
 	body := decode(t, resp.Body)
 	assert.Equal(t, "invalid", body.Code)
 	assert.Nil(t, body.Details)
+
+	rest := BadRequest("invalid", "bad", math.NaN()).APIGatewayProxy()
+	assert.Equal(t, http.StatusBadRequest, rest.StatusCode, "the status survives behind a REST API too")
+	assert.Nil(t, decode(t, rest.Body).Details)
 }
 
 func TestErrorInvalidUTF8(t *testing.T) {
@@ -102,6 +131,10 @@ func TestErrorInvalidUTF8(t *testing.T) {
 	body := decode(t, NotFound("bad\xffcode", "bad\xfemessage", nil).APIGatewayV2().Body)
 	assert.Equal(t, "bad�code", body.Code)
 	assert.Equal(t, "bad�message", body.Message)
+
+	rest := decode(t, NotFound("bad\xffcode", "bad\xfemessage", nil).APIGatewayProxy().Body)
+	assert.Equal(t, "bad�code", rest.Code)
+	assert.Equal(t, "bad�message", rest.Message)
 }
 
 func TestSuccessResponses(t *testing.T) {

@@ -171,24 +171,25 @@ func (h Handler[E, R]) Call(ctx context.Context, event E) (R, error) {
 
 // callInner runs the business handler for one invocation.
 //
-// An API Gateway HTTP handler that fails still answers its client. The error
-// or the panic is reported. Then the client gets the response the handler
-// returned if it built one, and the standard 500 envelope if it did not.
-// Without this, API Gateway would replace the body with its own generic
-// {"message":"Internal Server Error"}. The price is that Lambda counts the
-// invocation as a success: alarm on the error logs, not on the Errors metric.
+// An API Gateway handler (HTTP API or REST API) that fails still answers its
+// client. The error or the panic is reported. Then the client gets the
+// response the handler returned if it built one, and the standard 500
+// envelope if it did not. Without this, API Gateway would replace the body
+// with its own generic {"message":"Internal Server Error"}. The price is that
+// Lambda counts the invocation as a success: alarm on the error logs, not on
+// the Errors metric.
 func (h Handler[E, R]) callInner(ctx context.Context, event E) (result R, err error) {
-	if resp, api := any(&result).(*events.APIGatewayV2HTTPResponse); api {
+	if status, unhandled := apiResponse(&result); status != nil {
 		start := time.Now()
 		defer func() {
 			// A panic has already been written down by reportPanic.
 			if recover() != nil || err != nil {
-				if resp.StatusCode == 0 {
-					*resp = errUnhandled.APIGatewayV2()
+				if *status == 0 {
+					unhandled()
 				}
 				err = nil
 			}
-			h.c.apiCompleted(ctx, event, resp.StatusCode, time.Since(start))
+			h.c.apiCompleted(ctx, event, *status, time.Since(start))
 		}()
 	}
 
@@ -233,15 +234,16 @@ func (c *Container) invoke(ctx context.Context, event any, run func(context.Cont
 	invocation := trace.SpanFromContext(ctx)
 
 	err = errPanicked // what the span records if the handler never returns
-	if _, api := event.(events.APIGatewayV2HTTPRequest); api {
+	_, api := describeAPI(event)
+	if api {
 		// Call answers a failed API request with a 500 and no error, so the
 		// tracer would not see the failure: mark the invocation span here.
 		defer func() { recordError(invocation, err) }()
 	}
 	defer reportPanic(ctx, logger)
 
-	if r, ok := event.(events.APIGatewayV2HTTPRequest); ok {
-		logging.AppendKeys(ctx, "client_ip", c.clientIP(&r))
+	if api {
+		logging.AppendKeys(ctx, "client_ip", c.apiClientIP(event))
 	}
 
 	if initErr := c.initialize(ctx, logger); initErr != nil {
@@ -285,13 +287,13 @@ func (c *Container) report(ctx context.Context, err error) error {
 // apiCompleted records how an API request ended: a log line, which the 4xx
 // leave no other trace in, and the request on the invocation's span.
 func (c *Container) apiCompleted(ctx context.Context, event any, status int, took time.Duration) {
-	r, _ := event.(events.APIGatewayV2HTTPRequest) //nolint:errcheck // a non-API event leaves the fields empty
+	r, _ := describeAPI(event) // a non-API event leaves the fields empty
 	c.logger().InfoContext(ctx, "API request completed",
 		"status", status,
-		"routeKey", r.RouteKey,
+		"routeKey", r.routeKey,
 		"durationMs", milliseconds(took),
 	)
-	annotateAPI(ctx, &r, status, c.clientIP(&r))
+	annotateAPI(ctx, &r, status, c.apiClientIP(event))
 }
 
 // milliseconds is d as fractional milliseconds, the unit every duration in

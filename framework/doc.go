@@ -23,6 +23,9 @@
 //		...
 //	}
 //
+// The same routes serve an API Gateway REST API with a Lambda proxy
+// integration: lambda.Start(c.REST()) instead of lambda.Start(c.HTTP()).
+//
 // Any other event source hands its handler to Handle (for handlers that answer
 // with a result) or Consume (for handlers that only succeed or fail):
 //
@@ -39,7 +42,7 @@
 //
 // A handler reports a failure by returning it, and writes nothing itself: the
 // framework logs it once, at Error, and that record is what error tracking
-// reads. An HTTP API answers every failure with the error envelope of package
-// response, the router's own (404, validation) included, instead of API
-// Gateway's generic 500.
+// reads. An HTTP API or a REST API answers every failure with the error
+// envelope of package response, the router's own (404, validation) included,
+// instead of API Gateway's generic 500.
 package framework
