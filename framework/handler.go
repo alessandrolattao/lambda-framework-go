@@ -178,6 +178,10 @@ func (h Handler[E, R]) Call(ctx context.Context, event E) (R, error) {
 // with its own generic {"message":"Internal Server Error"}. The price is that
 // Lambda counts the invocation as a success: alarm on the error logs, not on
 // the Errors metric.
+//
+// The response, whichever it is, then gets the CORS headers the request's
+// origin is allowed (see WithCORSOrigins): the last change before it goes to
+// Lambda.
 func (h Handler[E, R]) callInner(ctx context.Context, event E) (result R, err error) {
 	if status, unhandled := apiResponse(&result); status != nil {
 		start := time.Now()
@@ -189,6 +193,7 @@ func (h Handler[E, R]) callInner(ctx context.Context, event E) (result R, err er
 				}
 				err = nil
 			}
+			allowResponseOrigin(&result, h.c.corsOrigin(event))
 			h.c.apiCompleted(ctx, event, *status, time.Since(start))
 		}()
 	}

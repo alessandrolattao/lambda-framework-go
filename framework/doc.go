@@ -49,5 +49,6 @@
 // reads. An HTTP API or a REST API answers every failure with the error
 // envelope of package response, the router's own (404, validation) included,
 // instead of API Gateway's generic 500; so does a stream that fails before
-// its first byte.
+// its first byte. With WithCORSOrigins (or CORS_ALLOW_ORIGINS) the API
+// responses, error envelopes included, allow the listed origins.
 package framework

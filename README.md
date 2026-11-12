@@ -315,6 +315,61 @@ api.deploy();
 Lambda does (With SST, under Configuration) and ends it with
 `lambda.Start(c.Stream(watchOrder))`.
 
+## CORS
+
+A browser app served from another origin can read the API's responses only
+when they allow its origin. List the origins with `WithCORSOrigins`, or in
+`CORS_ALLOW_ORIGINS`, separated by commas:
+
+```go
+c := framework.New(framework.WithCORSOrigins("https://app.example.com", "https://admin.example.com"))
+```
+
+```sh
+CORS_ALLOW_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+The option wins over the variable. In the variable, spaces around an origin
+and empty entries are ignored. With neither, CORS is off and no response
+changes.
+
+A request whose `Origin` header is one of the origins, exactly as the browser
+sends it (scheme, host, and the port when it is not the default), gets
+`Access-Control-Allow-Origin` with that origin, in place of any the response
+already had, and `Origin` added once to `Vary`, after the values `Vary`
+already lists. `*` in the list is an origin like any other, not a wildcard.
+Any other request, one without `Origin` included, gets no CORS header. There
+is no `Access-Control-Allow-Credentials` and no
+`Access-Control-Expose-Headers`: an API that reads a bearer token from
+`Authorization` needs neither.
+
+The headers go on every response the function hands to API Gateway: the
+routes of `HTTP` and `REST`, the router's error envelopes (`routeNotFound`,
+the validation errors), the 500 envelope of a failure no error handler
+answered, the metadata of a `Stream` before its first byte (an error before
+the first byte included), and the response of any `Handle` handler that
+answers with an `events.APIGatewayV2HTTPResponse` or an
+`events.APIGatewayProxyResponse`.
+
+What never reaches the function belongs to the API's own configuration:
+
+- the preflight `OPTIONS` request, which the browser sends before a request
+  with an `Authorization` header or a JSON body;
+- the responses API Gateway writes itself: its gateway responses
+  (`DEFAULT_4XX`, `DEFAULT_5XX`) and an authorizer's 401. Without
+  `Access-Control-Allow-Origin` on them the browser reports a CORS error
+  instead of the status.
+
+An HTTP API with its own CORS configuration answers the preflight itself and
+ignores the CORS headers of the integration, so the framework's headers
+change nothing there.
+
+The router has a CORS of its own, `WithRouter(eventhandler.WithCORS(...))`,
+which also answers the preflight `OPTIONS` of the routes, but sees only the
+responses the router writes: not the 500 envelope of a failure no error
+handler answered, nor a `Stream`. Use one or the other, not both: with both,
+the framework's `Access-Control-Allow-Origin` replaces the router's.
+
 ## What happens around a handler
 
 - **The Powertools decorators, stacked as Powertools recommends.** The logger's
@@ -382,6 +437,7 @@ Options of `framework.New`:
 | `WithRouter(opts...)` | | Options of the Event Handler router (CORS, debug, strip prefixes, OpenAPI) |
 | `WithDatabaseURL(url)` | `DATABASE_URL` | Postgres connection string |
 | `WithDSQLEndpoint(endpoint)` | `DSQL_ENDPOINT` | Aurora DSQL cluster endpoint, in the region in `AWS_REGION` |
+| `WithCORSOrigins(origins...)` | `CORS_ALLOW_ORIGINS`, else off | Origins a browser may call the API from (see [CORS](#cors)) |
 | `WithTrustedProxies(n)` | `0` | Proxies in front of API Gateway (CloudFront is 1), used to find the client IP |
 
 Environment variables: every `POWERTOOLS_*` variable of the utilities
@@ -393,6 +449,7 @@ for indented logs while developing...), Lambda's `AWS_LAMBDA_LOG_LEVEL`, and:
 |----------|---------|
 | `DATABASE_URL` | Postgres connection string, when `WithDatabaseURL` is not used |
 | `DSQL_ENDPOINT` | Aurora DSQL cluster endpoint, when `WithDSQLEndpoint` is not used |
+| `CORS_ALLOW_ORIGINS` | Origins a browser may call the API from, separated by commas, when `WithCORSOrigins` is not used |
 | `AWS_REGION` | The region of the Aurora DSQL cluster; Lambda sets it to the function's own |
 | `WS_ENDPOINT` | WebSocket API endpoint; without it `Websocket` is nil |
 | `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3` | A custom S3 endpoint (MinIO, LocalStack, Floci); S3 then uses path-style addressing |
