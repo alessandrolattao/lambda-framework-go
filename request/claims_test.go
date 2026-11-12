@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/alessandrolattao/lambda-framework-go/internal/apievent"
 )
 
 const (
@@ -255,6 +257,17 @@ func TestClaimsFromTheRESTRequestContext(t *testing.T) {
 	serveREST(t, restRequestWithClaims(map[string]any{claimSub: "sub-123", "userId": id.String()}), func(ctx context.Context) {
 		checkClaims(t, ctx, id)
 	})
+}
+
+func TestClaimsOfAStreamingRequest(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.New()
+	r := restRequestWithClaims(map[string]any{claimSub: "sub-123", "userId": id.String()})
+	checkClaims(t, apievent.WithREST(t.Context(), r), id)
+
+	_, err := Claims(apievent.WithREST(t.Context(), &events.APIGatewayProxyRequest{}))
+	require.ErrorIs(t, err, ErrClaimsNotFound, "a streaming request without an authorizer")
 }
 
 func TestRESTUserID_InvalidUUID(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/alessandrolattao/lambda-framework-go/internal/apievent"
 	"github.com/alessandrolattao/lambda-framework-go/response"
 )
 
@@ -195,12 +196,13 @@ func validationCode(details []eventhandler.ValidationErrorDetail) string {
 
 // ClientIP returns the address of the client that called the API, looking
 // past the trusted proxies set with WithTrustedProxies, for the request ctx
-// belongs to; "" outside an API Gateway request (HTTP API or REST API).
+// belongs to (a routed request or a streaming one); "" outside an API Gateway
+// request (HTTP API or REST API).
 func (c *Container) ClientIP(ctx context.Context) string {
 	if r, ok := eventhandler.APIGatewayHTTPEvent(ctx); ok {
 		return c.clientIP(&r)
 	}
-	if r, ok := eventhandler.APIGatewayRESTEvent(ctx); ok {
+	if r, ok := apievent.REST(ctx); ok {
 		return c.restClientIP(&r)
 	}
 	return ""
