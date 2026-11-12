@@ -151,9 +151,10 @@ func (c *Container) newRouter() *eventhandler.Router {
 }
 
 // serverFailure reports a failure an error handler answered with a 5xx: once,
-// at Error, and on the span of the business logic the request ran in.
+// at Error (a rejection in its chain too), and on the span of the business
+// logic the request ran in.
 func (c *Container) serverFailure(ctx context.Context, err error) {
-	_ = reportError(ctx, c.logger(), err) //nolint:errcheck // reportError returns its argument
+	_ = reportFailure(ctx, c.logger(), err) //nolint:errcheck // reportFailure returns its argument
 	recordError(trace.SpanFromContext(ctx), err)
 }
 

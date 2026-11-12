@@ -257,7 +257,11 @@ func (c *Container) invoke(ctx context.Context, event any, run func(context.Cont
 
 	logEvent(ctx, logger, event)
 
-	return reportError(ctx, logger, c.businessLogic(ctx, run))
+	report := reportError
+	if api {
+		report = reportFailure // a rejection answers the 500 envelope: see Reject
+	}
+	return report(ctx, logger, c.businessLogic(ctx, run))
 }
 
 // businessLogic runs the business handler in its own span, "## businessLogic",
