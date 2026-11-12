@@ -1,6 +1,7 @@
 // Package response answers the typed operations of an Event Handler router
 // (github.com/alessandrolattao/powertools-lambda-go/eventhandler): success
-// responses with their cache headers, CSV bodies, and the error envelope.
+// responses with their cache headers, CSV bodies, and the error envelope. It
+// also writes the server-sent events of a streaming handler (SSE).
 //
 // A typed operation returns its result, or a *Error:
 //

@@ -8,6 +8,8 @@ import (
 
 	"github.com/alessandrolattao/powertools-lambda-go/eventhandler"
 	"github.com/aws/aws-lambda-go/events"
+
+	"github.com/alessandrolattao/lambda-framework-go/internal/apievent"
 )
 
 // claimUserID is the custom claim carrying the internal user id.
@@ -98,22 +100,23 @@ func claimOf(claims map[string]string, name string) (string, error) {
 // claimsFrom returns the claims of the API Gateway request ctx is serving:
 // the Event Handler router keeps the event in the context of every request,
 // an HTTP API one (JWT authorizer) or a REST API one (Cognito user pool
-// authorizer).
+// authorizer), and so does the framework's streaming handler for its REST
+// API request.
 func claimsFrom(ctx context.Context) (map[string]string, error) {
 	if r, ok := eventhandler.APIGatewayHTTPEvent(ctx); ok {
 		return claimsOf(&r)
 	}
-	if r, ok := eventhandler.APIGatewayRESTEvent(ctx); ok {
+	if r, ok := apievent.REST(ctx); ok {
 		return restClaimsOf(&r)
 	}
 	return nil, ErrClaimsNotFound
 }
 
 // Claims returns the claims API Gateway's authorizer verified for the request
-// ctx belongs to (a typed operation's context, or r.Context() in a plain
-// handler): the JWT authorizer's behind an HTTP API, the Cognito user pool
-// authorizer's behind a REST API. Every value is a string, as payload format
-// 2.0 delivers them.
+// ctx belongs to (a typed operation's context, r.Context() in a plain
+// handler, or the context of a streaming handler): the JWT authorizer's
+// behind an HTTP API, the Cognito user pool authorizer's behind a REST API.
+// Every value is a string, as payload format 2.0 delivers them.
 func Claims(ctx context.Context) (map[string]string, error) {
 	return claimsFrom(ctx)
 }

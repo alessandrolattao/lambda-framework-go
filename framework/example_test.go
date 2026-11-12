@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
 	"uuid"
 
 	"github.com/alessandrolattao/powertools-lambda-go/logging"
@@ -70,6 +72,45 @@ func ExampleContainer_REST() {
 	// 200 <nil>
 	// 422 <nil>
 	// 404 <nil>
+}
+
+// watchPrices is a streaming handler: each price reaches the client as a
+// server-sent event as soon as it is written.
+func watchPrices(_ context.Context, _ *framework.Container, _ events.APIGatewayProxyRequest, w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, price := range []string{`{"amount":41}`, `{"amount":42}`} {
+		if err := response.SSE(w, "price", price); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ExampleContainer_Stream() {
+	c := framework.New(framework.WithLogging(logging.WithWriter(io.Discard)))
+	h := c.Stream(watchPrices) // in main: lambda.Start(h)
+
+	r, err := h(context.Background(), events.APIGatewayProxyRequest{HTTPMethod: "GET", Resource: "/prices", Path: "/prices"})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	stream, err := io.ReadAll(r)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	// What Lambda hands API Gateway: the metadata, 8 null bytes, the body.
+	metadata, body, _ := strings.Cut(string(stream), strings.Repeat("\x00", 8))
+	fmt.Println(metadata)
+	fmt.Print(body)
+	// Output:
+	// {"statusCode":200,"headers":{"Content-Type":"text/event-stream"}}
+	// event: price
+	// data: {"amount":41}
+	//
+	// event: price
+	// data: {"amount":42}
 }
 
 func ExampleContainer_Consume() {

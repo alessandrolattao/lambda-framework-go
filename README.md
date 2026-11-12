@@ -20,9 +20,9 @@ go get github.com/alessandrolattao/lambda-framework-go
 
 | Package    | What it does |
 |------------|--------------|
-| `framework` | `Container` with the dependencies; `Get`/`Post`/`Put`/`Patch`/`Delete`, then `HTTP` for API Gateway HTTP APIs or `REST` for REST APIs; `Handle` and `Consume` for every other event; error and panic reporting |
+| `framework` | `Container` with the dependencies; `Get`/`Post`/`Put`/`Patch`/`Delete`, then `HTTP` for API Gateway HTTP APIs or `REST` for REST APIs; `Stream` for a REST API endpoint that streams its response; `Handle` and `Consume` for every other event; error and panic reporting |
 | `request`  | What typed binding does not cover: the claims API Gateway's authorizer verified, the client IP behind trusted proxies, comma-separated id lists |
-| `response` | The error envelope, success responses with cache headers, CSV and content negotiation |
+| `response` | The error envelope, success responses with cache headers, CSV and content negotiation, server-sent events |
 | `migrate`  | The business handler of a migration Lambda: goose SQL migrations on Aurora DSQL (or Postgres) |
 | `sst`      | The resources SST links to a Lambda: the value of an `sst.Secret`, the properties of any other component |
 
@@ -112,7 +112,9 @@ func main() {
 
 An HTTP API is cheaper and faster; choose a REST API when the API needs what
 only REST APIs offer, response streaming (server-sent events) for one. `REST`
-answers each request with one buffered response, as `HTTP` does.
+answers each request with one buffered response, as `HTTP` does; an endpoint
+that streams its response is a Lambda of its own, served by `Stream` (see
+[Streaming from a REST API](#streaming-from-a-rest-api)).
 
 A REST API request gets what an HTTP API request gets: the same binding,
 validation, responses and error envelope, the 500 envelope for a failure, the
@@ -187,6 +189,131 @@ func main() {
 Behind the proxy resource every request has the resource `/{proxy+}`, which
 is then the `routeKey` of the records and the route of the span; a route of
 its own (`api.route("GET /orders/{id}", ...)`) keeps them apart.
+
+## Streaming from a REST API
+
+A REST API can stream a Lambda's response: the client gets each part as soon
+as the function writes it, which is how an API serves server-sent events
+(SSE). `Stream` serves one such endpoint. Its handler receives the request and
+a plain `http.ResponseWriter`, and `response.SSE` sends one event per call:
+
+```go
+func main() {
+	c := framework.New()
+	lambda.Start(c.Stream(watchOrder))
+}
+
+// watchOrder sends the status of an order each time it changes, until the
+// order is delivered.
+func watchOrder(ctx context.Context, c *framework.Container, req events.APIGatewayProxyRequest, w http.ResponseWriter) error {
+	if _, err := request.UserID(ctx); err != nil {
+		return response.Unauthorized("unauthorized", "no user in the token", nil)
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+
+	sent := ""
+	for {
+		var status string
+		err := c.DB.QueryRow(ctx, "SELECT status FROM orders WHERE id = $1", req.PathParameters["id"]).Scan(&status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return response.NotFound("orderNotFound", "no order with this id", nil)
+		}
+		if err != nil {
+			return fmt.Errorf("read the status of order %s: %w", req.PathParameters["id"], err)
+		}
+		if status != sent {
+			if err := response.SSE(w, "status", status); err != nil {
+				return err
+			}
+			sent = status
+		}
+		if status == "delivered" {
+			return nil
+		}
+		select {
+		case <-ctx.Done(): // the function's timeout is near
+			return nil
+		case <-time.After(time.Second):
+		}
+	}
+}
+```
+
+The writer works as any `http.ResponseWriter`, and is an `http.Flusher`:
+`Header` and `WriteHeader` set the headers and the status (200 unless the
+handler sets one), the first `Write` or `Flush` sends them, and from then on
+every write reaches the client as it is made. A `Set-Cookie` header goes out
+as the response's cookies, a header with several values as its
+`multiValueHeaders`. Status and headers must fit in 16 KB.
+
+`response.SSE(w, event, data)` writes the `event:` line when `event` is not
+empty, one `data:` line for each line of `data` (split on CRLF, CR and LF),
+the blank line that ends the event, and flushes it. `event` must be one line:
+one with a CR or an LF returns `response.ErrSSEEventName` and writes nothing.
+
+What a failure gives depends on whether anything has gone out:
+
+- **Before the first byte** the client still gets a proper answer: a
+  `*response.Error` answers with its status and envelope, any other error or a
+  panic with the 500 `serverError` envelope. A 5xx is reported once, with its
+  cause, as for a typed operation; a 4xx is not a failure.
+- **After the first byte** the status is gone: the error or the panic is
+  reported, and the stream ends there, as an SSE client expects.
+
+A streaming request gets what any API request gets: the Powertools
+decorators, the `API request received` record, the handler in the
+`## businessLogic` span, `client_ip`, and `API request completed` when the
+stream closes, with the status sent and how long the stream stayed open.
+`request.Claims`, `request.Claim`, `request.UserID` (behind a Cognito user
+pool authorizer) and `c.ClientIP(ctx)` work in the handler as in a typed
+operation.
+
+### The integration
+
+API Gateway streams a response only from an integration set up for it, on
+each method of the endpoint:
+
+- integration type `AWS_PROXY`, the Lambda proxy integration;
+- `responseTransferMode` `STREAM` (the default is `BUFFERED`);
+- the integration URI of streaming invocations,
+  `arn:aws:apigateway:<region>:lambda:path/2021-11-15/functions/<function arn>/response-streaming-invocations`,
+  so that API Gateway invokes the function with `InvokeWithResponseStream`.
+
+The setting belongs to the integration, so a streaming endpoint has a Lambda
+of its own; the other routes stay on a Lambda that serves the router with
+`REST`.
+
+### With SST
+
+SST 4.3 or later sets the transfer mode and the URI when the function of a
+route has `streaming: true`:
+
+```ts
+const userPool = new sst.aws.CognitoUserPool("UserPool");
+const database = new sst.aws.Dsql("Database");
+
+const api = new sst.aws.ApiGatewayV1("Api");
+const cognito = api.addAuthorizer({
+  name: "Cognito",
+  userPools: [userPool.arn],
+});
+api.route(
+  "ANY /{proxy+}",
+  { handler: "./cmd/orders", runtime: "go", link: [database] },
+  { auth: { cognito: { authorizer: cognito.id } } },
+);
+api.route(
+  "GET /orders/{id}/events",
+  { handler: "./cmd/orders-stream", runtime: "go", link: [database], streaming: true },
+  { auth: { cognito: { authorizer: cognito.id } } },
+);
+api.deploy();
+```
+
+`./cmd/orders-stream` reads the linked database in its `main` as any other
+Lambda does (With SST, under Configuration) and ends it with
+`lambda.Start(c.Stream(watchOrder))`.
 
 ## What happens around a handler
 
@@ -566,7 +693,9 @@ got, err := getOrder(t.Context(), c, orderID{ID: id})
 
 To go through the framework as well, routing and validation included, call the
 Lambda handler with an event: `c.HTTP().Call(ctx, request)`,
-`c.REST().Call(ctx, request)`, or `c.Handle(h).Call(ctx, event)`.
+`c.REST().Call(ctx, request)`, or `c.Handle(h).Call(ctx, event)`. A streaming
+handler answers with the stream: `r, err := c.Stream(op)(ctx, request)`, then
+read `r` to its end, the JSON metadata, 8 null bytes, then the body.
 
 ## Development
 
